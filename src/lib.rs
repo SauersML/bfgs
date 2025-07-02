@@ -405,8 +405,9 @@ where
             let mut trial = alpha_hi
                 - (alpha_hi - alpha_lo) * (g_hi_dot_d + d2 - d1)
                     / (g_hi_dot_d - g_lo_dot_d + 2.0 * d2);
-            // If interpolation gives a point outside the bracket, bisect instead.
-            if trial < alpha_lo || trial > alpha_hi {
+            // If interpolation gives a NaN, a non-finite value, or a point outside
+            // the bracket, fall back to bisection.
+            if !trial.is_finite() || trial < alpha_lo || trial > alpha_hi {
                 trial = (alpha_lo + alpha_hi) / 2.0;
             }
             trial
