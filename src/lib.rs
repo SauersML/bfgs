@@ -298,6 +298,13 @@ where
         func_evals += 1;
         grad_evals += 1;
 
+        // If the objective function returns non-finite values, the line search has
+        // entered an unstable region and cannot proceed. The Wolfe conditions are
+        // not well-defined for non-finite inputs.
+        if !f_i.is_finite() || g_i.iter().any(|&v| !v.is_finite()) {
+            return Err(BfgsError::LineSearchFailed { max_attempts });
+        }
+
         // The sufficient decrease (Armijo) condition.
         if f_i > f_k + c1 * alpha_i * g_k_dot_d || (func_evals > 1 && f_i >= f_prev) {
             // The minimum is now bracketed between alpha_prev and alpha_i.
@@ -427,6 +434,15 @@ where
         let (f_j, g_j) = obj_fn(&x_j);
         func_evals += 1;
         grad_evals += 1;
+
+        // If the objective function returns non-finite values, the line search has
+        // entered an unstable region and cannot proceed. The Wolfe conditions are
+        // not well-defined for non-finite inputs.
+        if !f_j.is_finite() || g_j.iter().any(|&v| !v.is_finite()) {
+            return Err(BfgsError::LineSearchFailed {
+                max_attempts: max_zoom_attempts,
+            });
+        }
 
         // Check if the new point `alpha_j` satisfies the sufficient decrease condition.
         if f_j > f_k + c1 * alpha_j * g_k_dot_d || f_j >= f_lo {
