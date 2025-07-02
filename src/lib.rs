@@ -447,9 +447,17 @@ where
         func_evals += 1;
         grad_evals += 1;
 
+        // If the objective function or gradient becomes non-finite at the trial
+        // point, the line search has entered an unstable region. This is
+        // considered a failure, as the algorithm cannot proceed reliably.
+        if !f_j.is_finite() || g_j.iter().any(|&v| !v.is_finite()) {
+            return Err(BfgsError::LineSearchFailed {
+                max_attempts: max_zoom_attempts,
+            });
+        }
+
         // Check if the new point `alpha_j` satisfies the sufficient decrease condition.
-        // A non-finite value for `f_j` indicates `alpha_j` is too high.
-        if !f_j.is_finite() || f_j > f_k + c1 * alpha_j * g_k_dot_d || f_j >= f_lo {
+        if f_j > f_k + c1 * alpha_j * g_k_dot_d || f_j >= f_lo {
             // The new point is not good enough, shrink the interval from the high end.
             alpha_hi = alpha_j;
             f_hi = f_j;
@@ -463,16 +471,15 @@ where
             }
 
             // If derivative at alpha_j is positive, the minimum is in [alpha_lo, alpha_j].
-            if g_j_dot_d >= 0.0 {
-                alpha_hi = alpha_j;
-                f_hi = f_j;
-                g_hi_dot_d = g_j_dot_d;
-            } else {
-                // If derivative at alpha_j is negative, the minimum is in [alpha_j, alpha_hi].
-                alpha_lo = alpha_j;
-                f_lo = f_j;
-                g_lo_dot_d = g_j_dot_d;
+            if g_j_dot_d * (alpha_hi - alpha_lo) >= 0.0 {
+                alpha_hi = alpha_lo;
+                f_hi = f_lo;
+                g_hi_dot_d = g_lo_dot_d;
             }
+            // If derivative at alpha_j is negative, the minimum is in [alpha_j, alpha_hi].
+            alpha_lo = alpha_j;
+            f_lo = f_j;
+            g_lo_dot_d = g_j_dot_d;
         }
     }
     Err(BfgsError::LineSearchFailed {
