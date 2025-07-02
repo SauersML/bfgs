@@ -15,5 +15,5 @@ thiserror = "2.0.12"
 
 [dev-dependencies]
 spectral = "0.6.0"
-argmin = { version = "0.10.0", features = ["ndarray-linalg"] }
-argmin-math = "0.4.0"
+argmin = "0.10.0"
+argmin-math = { version = "0.4.0", features = "ndarray_latest" }
