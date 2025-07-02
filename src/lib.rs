@@ -360,17 +360,22 @@ where
     ObjFn: Fn(&Array1<f64>) -> (f64, Array1<f64>),
 {
     let max_zoom_attempts = 10;
+    
+    // Compute f_hi and g_hi_dot_d once initially
+    let (mut f_hi, g_hi) = obj_fn(&(x_k + alpha_hi * d_k));
+    func_evals += 1;
+    grad_evals += 1;
+    let mut g_hi_dot_d = g_hi.dot(d_k);
+    
     for _ in 0..max_zoom_attempts {
         // Ensure alpha_lo < alpha_hi for stable interpolation.
         if alpha_lo > alpha_hi {
             std::mem::swap(&mut alpha_lo, &mut alpha_hi);
+            std::mem::swap(&mut f_lo, &mut f_hi);
+            std::mem::swap(&mut g_lo_dot_d, &mut g_hi_dot_d);
         }
 
         // --- Cubic interpolation to find a trial step size `alpha_j` ---
-        let (f_hi, g_hi) = obj_fn(&(x_k + alpha_hi * d_k));
-        func_evals += 1;
-        grad_evals += 1;
-        let g_hi_dot_d = g_hi.dot(d_k);
 
         let d1 = g_lo_dot_d + g_hi_dot_d - 3.0 * (f_lo - f_hi) / (alpha_lo - alpha_hi);
         let d2_sq = d1.powi(2) - g_lo_dot_d * g_hi_dot_d;
@@ -406,6 +411,8 @@ where
         if f_j > f_k + c1 * alpha_j * g_k_dot_d || f_j >= f_lo {
             // The new point is not good enough, shrink the interval from the high end.
             alpha_hi = alpha_j;
+            f_hi = f_j;
+            g_hi_dot_d = g_j.dot(d_k);
         } else {
             let g_j_dot_d = g_j.dot(d_k);
             // Check the curvature condition.
@@ -414,14 +421,17 @@ where
                 return Ok((alpha_j, f_j, g_j, func_evals, grad_evals));
             }
 
-            if g_j_dot_d * (alpha_hi - alpha_lo) >= 0.0 {
-                alpha_hi = alpha_lo;
+            // If derivative at alpha_j is positive, the minimum is in [alpha_lo, alpha_j]
+            if g_j_dot_d >= 0.0 {
+                alpha_hi = alpha_j;
+                f_hi = f_j;
+                g_hi_dot_d = g_j_dot_d;
+            } else {
+                // If derivative at alpha_j is negative, the minimum is in [alpha_j, alpha_hi]
+                alpha_lo = alpha_j;
+                f_lo = f_j;
+                g_lo_dot_d = g_j_dot_d;
             }
-            // The new point is good, but doesn't satisfy curvature yet.
-            // Shrink the interval from the low end.
-            alpha_lo = alpha_j;
-            f_lo = f_j;
-            g_lo_dot_d = g_j_dot_d;
         }
     }
     Err(BfgsError::LineSearchFailed {
