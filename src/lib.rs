@@ -216,8 +216,10 @@ where
             // H_{k+1} = (I - ρ*s*yᵀ) * H_k * (I - ρ*y*sᵀ) + ρ*s*sᵀ
             // This is derived from the Sherman-Morrison-Woodbury formula.
             let rho = 1.0 / sy;
-            let s_k_col = s_k.insert_axis(Axis(1)); // Convert from (n,) to (n, 1)
-            let y_k_col = y_k.insert_axis(Axis(1)); // Convert from (n,) to (n, 1)
+            // Create 2D column vector views of s_k and y_k for outer product
+            // calculations, without consuming the original 1D vectors.
+            let s_k_col = s_k.view().insert_axis(Axis(1));
+            let y_k_col = y_k.view().insert_axis(Axis(1));
 
             // Explicit type annotation `::<f64>` is needed for the compiler to infer the
             // element type of the identity matrix in this context.
@@ -262,10 +264,13 @@ where ObjFn: Fn(&Array1<f64>) -> (f64, Array1<f64>),
         
         // The sufficient decrease (Armijo) condition.
         if f_i > f_k + c1 * alpha_i * g_k_dot_d || (func_evals > 1 && f_i >= f_prev) {
-            let (g_prev, _) = obj_fn(&(x_k + alpha_prev * d_k)); // Re-eval to get g_prev if needed
+            // The sufficient decrease condition is not met, or the function has increased.
+            // The minimum is now bracketed between the previous point and the current one.
+            let (_, g_prev) = obj_fn(&(x_k + alpha_prev * d_k));
             grad_evals += 1;
+            let g_prev_dot_d = g_prev.dot(d_k);
             return zoom(obj_fn, x_k, d_k, f_k, g_k_dot_d, c1, c2,
-                        alpha_prev, alpha_i, f_prev, g_prev.dot(d_k), f_i,
+                        alpha_prev, alpha_i, f_prev, g_prev_dot_d, f_i,
                         func_evals, grad_evals);
         }
 
@@ -277,7 +282,8 @@ where ObjFn: Fn(&Array1<f64>) -> (f64, Array1<f64>),
         }
 
         if g_i_dot_d >= 0.0 {
-            // The minimum is bracketed between alpha_prev and alpha_i.
+            // The curvature condition is met with a positive derivative, so the
+            // minimum is bracketed between the current point and the previous one.
             return zoom(obj_fn, x_k, d_k, f_k, g_k_dot_d, c1, c2,
                         alpha_i, alpha_prev, f_i, g_i_dot_d, f_prev,
                         func_evals, grad_evals);
@@ -309,7 +315,7 @@ where ObjFn: Fn(&Array1<f64>) -> (f64, Array1<f64>),
         // --- Cubic interpolation to find a trial step size `alpha_j` ---
         // This finds the minimizer of a cubic polynomial that interpolates the function
         // values and derivatives at alpha_lo and alpha_hi.
-        let (g_hi, _) = obj_fn(&(x_k + alpha_hi * d_k));
+        let (_, g_hi) = obj_fn(&(x_k + alpha_hi * d_k));
         grad_evals += 1;
         let g_hi_dot_d = g_hi.dot(d_k);
         
