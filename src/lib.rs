@@ -19,7 +19,7 @@
 //! Minimize the Rosenbrock function, a classic test case for optimization algorithms.
 //!
 //! ```
-//! use bfgs::{Bfgs, BfgsSolution, BfgsError};
+//! use wolfe_bfgs::{Bfgs, BfgsSolution, BfgsError};
 //! use ndarray::{array, Array1};
 //!
 //! // Define the Rosenbrock function and its gradient.
