@@ -22,7 +22,7 @@ First, add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-wolfe-bfgs = "0.1.0"
+wolfe_bfgs = "0.1.0"
 ```
 
 ### Example: Minimizing the Rosenbrock Function
