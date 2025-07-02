@@ -3,15 +3,19 @@
 //! This crate provides a solver for unconstrained nonlinear optimization problems,
 //! built upon the principles outlined in "Numerical Optimization" by Nocedal & Wright.
 //!
-//! It features:
-//! - A line search that guarantees the Strong Wolfe conditions, ensuring stability and
-//!   convergence, using an efficient cubic interpolation strategy.
-//! - A scaling heuristic for the initial Hessian approximation, leading to faster
-//!   convergence.
-//! - A clear, configurable, and ergonomic API using a builder pattern.
-//! - Detailed error handling and guaranteed termination.
+//! # Features
+//! - A line search implementing the **Strong Wolfe conditions** to ensure stability.
+//!   Global convergence is guaranteed for convex problems. For non-convex
+//!   problems, BFGS is a powerful and widely-used heuristic but may not always
+//!   converge to a local minimum.
+//! - A **scaling heuristic** for the initial Hessian approximation, which often
+//!   improves the rate of convergence.
+//! - A clear, configurable, and ergonomic API using the builder pattern.
+//! - **Robust termination criteria**, ensuring the algorithm always halts, either
+//!   at a solution or with a descriptive error for diagnostics.
 //!
 //! # Example
+//!
 //! Minimize the Rosenbrock function, a classic test case for optimization algorithms.
 //!
 //! ```
@@ -71,6 +75,8 @@ pub enum BfgsError {
 }
 
 /// A summary of a successful optimization run.
+///
+/// Note that for non-convex functions, convergence to a local minimum is not guaranteed.
 #[derive(Debug)]
 pub struct BfgsSolution {
     /// The point at which the minimum value was found.
@@ -117,7 +123,7 @@ where
             tolerance: 1e-5,
             max_iterations: 100,
             c1: 1e-4, // Standard value for sufficient decrease
-            c2: 0.9,   // Standard value for curvature condition
+            c2: 0.9,  // Standard value for curvature condition
         }
     }
 
@@ -144,40 +150,44 @@ where
         let mut b_inv: Array2<f64>;
 
         // --- Handle the first iteration separately for initial Hessian scaling ---
+        // This logic is designed to produce a well-scaled initial Hessian
+        // approximation `b_inv` (H_0) before entering the main loop.
         let g_norm = g_k.dot(&g_k).sqrt();
         if g_norm < self.tolerance {
             return Ok(BfgsSolution {
-                final_point: x_k, final_value: f_k, final_gradient_norm: g_norm,
-                iterations: 0, func_evals, grad_evals,
+                final_point: x_k,
+                final_value: f_k,
+                final_gradient_norm: g_norm,
+                iterations: 0,
+                func_evals,
+                grad_evals,
             });
         }
 
-        let g_0 = g_k.clone(); // Preserve the initial gradient g_0.
-
-        let d_0 = -g_0.clone();
+        // The first step uses the identity matrix as the initial Hessian guess.
+        let d_0 = -g_k.clone();
         let (alpha_0, f_1, g_1, f_evals, g_evals) =
-            line_search(&self.obj_fn, &x_k, &d_0, f_k, &g_0, self.c1, self.c2)?;
+            line_search(&self.obj_fn, &x_k, &d_0, f_k, &g_k, self.c1, self.c2)?;
         func_evals += f_evals;
         grad_evals += g_evals;
 
-        // Calculate the first step `s_0` and the change in gradient `y_0`.
         let s_0 = alpha_0 * d_0;
-        let y_0 = &g_1 - &g_0;
-        
-        // Update state for the main loop.
-        x_k = x_k + &s_0;
-        f_k = f_1;
-        g_k = g_1;
-        
-        // Apply the scaling heuristic for the initial inverse Hessian.
+        let y_0 = &g_1 - &g_k;
+
+        // Apply the scaling heuristic (Nocedal & Wright, Eq. 6.20) for the
+        // initial inverse Hessian used in the first formal iteration (k=1).
         let sy = s_0.dot(&y_0);
         let yy = y_0.dot(&y_0);
-
         b_inv = if sy > 0.0 && yy > 0.0 {
             Array2::<f64>::eye(n) * (sy / yy)
         } else {
-            Array2::<f64>::eye(n)
+            Array2::<f64>::eye(n) // Fallback to identity
         };
+
+        // Update state to reflect the completion of the first step.
+        x_k += &s_0;
+        f_k = f_1;
+        g_k = g_1;
         // --- End of first iteration ---
 
         for k in 1..self.max_iterations {
@@ -187,8 +197,12 @@ where
             }
             if g_norm < self.tolerance {
                 return Ok(BfgsSolution {
-                    final_point: x_k, final_value: f_k, final_gradient_norm: g_norm,
-                    iterations: k, func_evals, grad_evals,
+                    final_point: x_k,
+                    final_value: f_k,
+                    final_gradient_norm: g_norm,
+                    iterations: k,
+                    func_evals,
+                    grad_evals,
                 });
             }
 
@@ -204,50 +218,52 @@ where
             let sy = s_k.dot(&y_k);
 
             // A valid Wolfe line search should always ensure sy > 0.
-            // This check is a safeguard against potential floating-point issues.
+            // This check is a safeguard against potential floating-point issues or
+            // if a non-Wolfe line search were ever used.
             if sy <= 1e-10 {
                 return Err(BfgsError::CurvatureConditionViolated);
             }
 
-            // --- The BFGS Inverse Hessian Update Formula ---
+            // --- CORRECTED BFGS Inverse Hessian Update Formula ---
             // H_{k+1} = (I - ρ*s*yᵀ) * H_k * (I - ρ*y*sᵀ) + ρ*s*sᵀ
-            // This is derived from the Sherman-Morrison-Woodbury formula.
+            // (Nocedal & Wright, Eq. 6.17)
             let rho = 1.0 / sy;
-            // Create 2D column vector views of s_k and y_k for outer product
-            // calculations, without consuming the original 1D vectors.
             let s_k_col = s_k.view().insert_axis(Axis(1));
             let y_k_col = y_k.view().insert_axis(Axis(1));
 
-            // Explicit type annotation `::<f64>` is needed for the compiler to infer the
-            // element type of the identity matrix in this context.
-            let i_minus_rhosy = &Array2::<f64>::eye(n) - rho * s_k_col.dot(&y_k_col.t());
+            let term1 = &Array2::<f64>::eye(n) - rho * s_k_col.dot(&y_k_col.t());
+            let term2 = &Array2::<f64>::eye(n) - rho * y_k_col.dot(&s_k_col.t());
 
-            // The term `(I - ρ*y*sᵀ)` is the transpose of `(I - ρ*s*yᵀ)`.
-            b_inv = i_minus_rhosy.dot(&b_inv).dot(&i_minus_rhosy.t()) + rho * s_k_col.dot(&s_k_col.t());
-            
-            x_k = x_k + s_k;
+            b_inv = term1.dot(&b_inv).dot(&term2) + rho * s_k_col.dot(&s_k_col.t());
+
+            x_k += &s_k;
             f_k = f_next;
             g_k = g_next;
         }
 
-        Err(BfgsError::MaxIterationsReached { max_iterations: self.max_iterations })
+        Err(BfgsError::MaxIterationsReached {
+            max_iterations: self.max_iterations,
+        })
     }
 }
 
 /// A line search algorithm that finds a step size satisfying the Strong Wolfe conditions.
 ///
-/// This implementation follows the structure of Algorithm 3.5 in Nocedal & Wright.
+/// This implementation follows the structure of Algorithm 3.5 in Nocedal & Wright,
+/// with an efficient state-passing mechanism to avoid re-computation.
 fn line_search<ObjFn>(
-    obj_fn: ObjFn, x_k: &Array1<f64>, d_k: &Array1<f64>, f_k: f64, g_k: &Array1<f64>,
+    obj_fn: &ObjFn, x_k: &Array1<f64>, d_k: &Array1<f64>, f_k: f64, g_k: &Array1<f64>,
     c1: f64, c2: f64,
 ) -> Result<(f64, f64, Array1<f64>, usize, usize), BfgsError>
-where ObjFn: Fn(&Array1<f64>) -> (f64, Array1<f64>),
+where
+    ObjFn: Fn(&Array1<f64>) -> (f64, Array1<f64>),
 {
     let mut alpha_i = 1.0; // Per Nocedal & Wright, always start with a unit step.
     let mut alpha_prev = 0.0;
 
     let mut f_prev = f_k;
-    let g_k_dot_d = g_k.dot(d_k); // Initial derivative along the search direction. This is constant.
+    let g_k_dot_d = g_k.dot(d_k); // Initial derivative along the search direction.
+    let mut g_prev_dot_d = g_k_dot_d;
 
     let max_attempts = 20;
     let mut func_evals = 0;
@@ -258,17 +274,26 @@ where ObjFn: Fn(&Array1<f64>) -> (f64, Array1<f64>),
         let (f_i, g_i) = obj_fn(&x_new);
         func_evals += 1;
         grad_evals += 1;
-        
+
         // The sufficient decrease (Armijo) condition.
         if f_i > f_k + c1 * alpha_i * g_k_dot_d || (func_evals > 1 && f_i >= f_prev) {
-            // The sufficient decrease condition is not met, or the function has increased.
-            // The minimum is now bracketed between the previous point and the current one.
-            let (_, g_prev) = obj_fn(&(x_k + alpha_prev * d_k));
-            grad_evals += 1;
-            let g_prev_dot_d = g_prev.dot(d_k);
-            return zoom(obj_fn, x_k, d_k, f_k, g_k_dot_d, c1, c2,
-                        alpha_prev, alpha_i, f_prev, g_prev_dot_d, f_i,
-                        func_evals, grad_evals);
+            // The minimum is now bracketed between alpha_prev and alpha_i.
+            return zoom(
+                obj_fn,
+                x_k,
+                d_k,
+                f_k,
+                g_k_dot_d,
+                c1,
+                c2,
+                alpha_prev,
+                alpha_i,
+                f_prev,
+                g_prev_dot_d,
+                f_i,
+                func_evals,
+                grad_evals,
+            );
         }
 
         let g_i_dot_d = g_i.dot(d_k);
@@ -279,16 +304,30 @@ where ObjFn: Fn(&Array1<f64>) -> (f64, Array1<f64>),
         }
 
         if g_i_dot_d >= 0.0 {
-            // The curvature condition is met with a positive derivative, so the
-            // minimum is bracketed between the current point and the previous one.
-            return zoom(obj_fn, x_k, d_k, f_k, g_k_dot_d, c1, c2,
-                        alpha_i, alpha_prev, f_i, g_i_dot_d, f_prev,
-                        func_evals, grad_evals);
+            // The minimum is bracketed between alpha_i and alpha_prev.
+            // The new `hi` is the current point; the new `lo` is the previous.
+            return zoom(
+                obj_fn,
+                x_k,
+                d_k,
+                f_k,
+                g_k_dot_d,
+                c1,
+                c2,
+                alpha_prev,
+                alpha_i,
+                f_prev,
+                g_prev_dot_d,
+                f_i,
+                func_evals,
+                grad_evals,
+            );
         }
 
-        // The step is too short, expand the search interval.
+        // The step is too short, expand the search interval and cache current state.
         alpha_prev = alpha_i;
         f_prev = f_i;
+        g_prev_dot_d = g_i_dot_d;
         alpha_i *= 2.0;
     }
 
@@ -301,30 +340,42 @@ where ObjFn: Fn(&Array1<f64>) -> (f64, Array1<f64>),
 /// a point satisfying the Strong Wolfe conditions is known.
 #[allow(clippy::too_many_arguments)]
 fn zoom<ObjFn>(
-    obj_fn: ObjFn, x_k: &Array1<f64>, d_k: &Array1<f64>, f_k: f64, g_k_dot_d: f64,
+    obj_fn: &ObjFn, x_k: &Array1<f64>, d_k: &Array1<f64>, f_k: f64, g_k_dot_d: f64,
     c1: f64, c2: f64, mut alpha_lo: f64, mut alpha_hi: f64, mut f_lo: f64,
     mut g_lo_dot_d: f64, f_hi: f64, mut func_evals: usize, mut grad_evals: usize,
 ) -> Result<(f64, f64, Array1<f64>, usize, usize), BfgsError>
-where ObjFn: Fn(&Array1<f64>) -> (f64, Array1<f64>),
+where
+    ObjFn: Fn(&Array1<f64>) -> (f64, Array1<f64>),
 {
     let max_zoom_attempts = 10;
     for _ in 0..max_zoom_attempts {
         // --- Cubic interpolation to find a trial step size `alpha_j` ---
         // This finds the minimizer of a cubic polynomial that interpolates the function
         // values and derivatives at alpha_lo and alpha_hi.
-        let (_, g_hi) = obj_fn(&(x_k + alpha_hi * d_k));
+        let (f_hi_eval, g_hi) = obj_fn(&(x_k + alpha_hi * d_k));
+        func_evals += 1;
         grad_evals += 1;
         let g_hi_dot_d = g_hi.dot(d_k);
-        
-        let d1 = g_lo_dot_d + g_hi_dot_d - 3.0 * (f_lo - f_hi) / (alpha_lo - alpha_hi);
+        let current_f_hi = f_hi_eval;
+
+        let d1 = g_lo_dot_d + g_hi_dot_d - 3.0 * (f_lo - current_f_hi) / (alpha_lo - alpha_hi);
         let d2_sq = d1.powi(2) - g_lo_dot_d * g_hi_dot_d;
-        
-        let alpha_j = if d2_sq.is_sign_positive() {
+
+        let alpha_j = if d2_sq.is_sign_positive() && (alpha_lo - alpha_hi).abs() > 1e-12 {
             let d2 = d2_sq.sqrt();
-            alpha_hi - (alpha_hi - alpha_lo) * (g_hi_dot_d + d2 - d1) / (g_hi_dot_d - g_lo_dot_d + 2.0 * d2)
+            alpha_hi
+                - (alpha_hi - alpha_lo) * (g_hi_dot_d + d2 - d1)
+                    / (g_hi_dot_d - g_lo_dot_d + 2.0 * d2)
         } else {
-            // Fallback to bisection if interpolation fails or is not applicable.
+            // Fallback to bisection if interpolation fails or interval is too small.
             (alpha_lo + alpha_hi) / 2.0
+        };
+
+        // If alpha_j is not making progress, bisect instead.
+        let alpha_j = if (alpha_j - alpha_lo).abs() < 1e-12 || (alpha_j - alpha_hi).abs() < 1e-12 {
+            (alpha_lo + alpha_hi) / 2.0
+        } else {
+            alpha_j
         };
 
         let x_j = x_k + alpha_j * d_k;
@@ -354,9 +405,10 @@ where ObjFn: Fn(&Array1<f64>) -> (f64, Array1<f64>),
             g_lo_dot_d = g_j_dot_d;
         }
     }
-    Err(BfgsError::LineSearchFailed { max_attempts: max_zoom_attempts })
+    Err(BfgsError::LineSearchFailed {
+        max_attempts: max_zoom_attempts,
+    })
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -370,18 +422,26 @@ mod tests {
     //    `argmin`, a trusted, state-of-the-art optimization library, ensuring
     //    that our results (final point and iteration count) are equivalent.
 
+    // --- Cargo.toml setup for tests ---
+    // The tests below require `argmin` and `argmin-math`. Add these to your
+    // `[dev-dependencies]` in Cargo.toml and enable the `ndarray` feature
+    // for `argmin-math`:
+    //
+    // [dev-dependencies]
+    // argmin = "0.10.0"
+    // argmin-math = { version = "0.4.0", features = ["ndarray_latest-nolinalg"] }
+    // ndarray = "0.15"
+    // spectral = "0.6"
+    // thiserror = "1.0"
+
     use super::{Bfgs, BfgsError, BfgsSolution};
     use ndarray::{array, Array1};
     use spectral::prelude::*;
 
     // --- Test Harness: argmin Comparison Setup ---
-    // Import the necessary traits and modules from the argmin ecosystem.
-    // The `prelude` is essential for bringing the math traits into scope.
-    use argmin::core::{CostFunction, Error, Executor, Gradient, IterState, State};
+    use argmin::core::{prelude::*, CostFunction, Error, Executor, Gradient, IterState, State};
     use argmin::solver::linesearch::MoreThuenteLineSearch;
     use argmin::solver::quasinewton::BFGS as ArgminBFGS;
-    use argmin_math::prelude::*;
-    use argmin_math::ArgminNdArray;
 
     /// A wrapper to make our objective function signature compatible with argmin's traits.
     struct ArgminTestFn<F> {
@@ -424,7 +484,10 @@ mod tests {
         let a = 1.0;
         let b = 100.0;
         let f = (a - x[0]).powi(2) + b * (x[1] - x[0].powi(2)).powi(2);
-        let g = array![-2.0*(a-x[0])-4.0*b*(x[1]-x[0].powi(2))*x[0], 2.0*b*(x[1]-x[0].powi(2))];
+        let g = array![
+            -2.0 * (a - x[0]) - 4.0 * b * (x[1] - x[0].powi(2)) * x[0],
+            2.0 * b * (x[1] - x[0].powi(2))
+        ];
         (f, g)
     }
 
@@ -461,7 +524,10 @@ mod tests {
     #[test]
     fn test_begin_at_minimum_terminates_immediately() {
         let x0 = array![0.0, 0.0];
-        let BfgsSolution { iterations, .. } = Bfgs::new(x0, quadratic).run().unwrap();
+        let BfgsSolution { iterations, .. } = Bfgs::new(x0, quadratic)
+            .with_tolerance(1e-5)
+            .run()
+            .unwrap();
         assert_that(&iterations).is_less_than_or_equal_to(1);
     }
 
@@ -469,7 +535,10 @@ mod tests {
     fn test_max_iterations_error_is_returned() {
         let x0 = array![-1.2, 1.0];
         let result = Bfgs::new(x0, rosenbrock).with_max_iterations(5).run();
-        assert!(matches!(result, Err(BfgsError::MaxIterationsReached { .. })));
+        assert!(matches!(
+            result,
+            Err(BfgsError::MaxIterationsReached { .. })
+        ));
     }
 
     #[test]
@@ -488,7 +557,10 @@ mod tests {
         // This makes `sy` zero, violating the curvature condition. The solver should
         // not panic and should return the specific error.
         let result = Bfgs::new(x0, linear_function).run();
-        assert!(matches!(result, Err(BfgsError::CurvatureConditionViolated)));
+        assert!(matches!(
+            result,
+            Err(BfgsError::CurvatureConditionViolated)
+        ));
     }
 
     #[test]
@@ -524,22 +596,25 @@ mod tests {
         // Run argmin's implementation with synchronized settings.
         let problem = ArgminTestFn { func: rosenbrock };
         let linesearch = MoreThuenteLineSearch::new();
-        let solver = ArgminBFGS::new(linesearch);
+        let solver = ArgminBFGS::new(linesearch)
+            .with_tolerance_grad(tolerance)
+            .unwrap();
         let argmin_res = Executor::new(problem, solver)
             .configure(|state: &mut IterState<_, _, _, _, _, _>| {
-                state.param(x0).max_iters(100).target_cost(0.0).grad_norm_tol(tolerance)
+                state.param(x0).max_iters(100).target_cost(0.0)
             })
             .run()
             .unwrap();
 
         // Assert that the final points are virtually identical.
-        let distance = (&our_res.final_point - argmin_res.state.get_best_param().unwrap())
-            .l2_norm();
+        let distance = (&our_res.final_point - argmin_res.state().get_best_param().unwrap())
+            .l2_norm()
+            .unwrap();
         assert_that!(&distance).is_less_than(1e-6);
 
         // Assert that the number of iterations is very similar. A small difference
         // is acceptable due to minor, valid variations in line search implementations.
-        let iter_diff = (our_res.iterations as i64 - argmin_res.state.get_iter() as i64).abs();
+        let iter_diff = (our_res.iterations as i64 - argmin_res.state().get_iter() as i64).abs();
         assert_that(&iter_diff).is_less_than_or_equal_to(5);
     }
 
@@ -557,21 +632,24 @@ mod tests {
         // Run argmin's implementation with synchronized settings.
         let problem = ArgminTestFn { func: quadratic };
         let linesearch = MoreThuenteLineSearch::new();
-        let solver = ArgminBFGS::new(linesearch);
+        let solver = ArgminBFGS::new(linesearch)
+            .with_tolerance_grad(tolerance)
+            .unwrap();
         let argmin_res = Executor::new(problem, solver)
             .configure(|state: &mut IterState<_, _, _, _, _, _>| {
-                state.param(x0).max_iters(100).target_cost(0.0).grad_norm_tol(tolerance)
+                state.param(x0).max_iters(100).target_cost(0.0)
             })
             .run()
             .unwrap();
 
         // Assert that the final points are virtually identical.
-        let distance = (&our_res.final_point - argmin_res.state.get_best_param().unwrap())
-            .l2_norm();
+        let distance = (&our_res.final_point - argmin_res.state().get_best_param().unwrap())
+            .l2_norm()
+            .unwrap();
         assert_that!(&distance).is_less_than(1e-6);
 
         // Assert that the number of iterations is very similar.
-        let iter_diff = (our_res.iterations as i64 - argmin_res.state.get_iter() as i64).abs();
+        let iter_diff = (our_res.iterations as i64 - argmin_res.state().get_iter() as i64).abs();
         assert_that(&iter_diff).is_less_than_or_equal_to(3);
     }
 }
