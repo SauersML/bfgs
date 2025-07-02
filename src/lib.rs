@@ -59,7 +59,7 @@
 //! assert!((x_min[1] - 1.0).abs() < 1e-5);
 //! ```
 
-use ndarray::{Array1, Array2, Axis};
+use ndarray::{Array1, Array2};
 
 /// An error type for clear diagnostics.
 #[derive(Debug, thiserror::Error)]
@@ -223,17 +223,32 @@ where
                 return Err(BfgsError::CurvatureConditionViolated);
             }
 
-            // --- CORRECTED BFGS Inverse Hessian Update Formula ---
-            // H_{k+1} = (I - ρ*s*yᵀ) * H_k * (I - ρ*y*sᵀ) + ρ*s*sᵀ
-            // (Nocedal & Wright, Eq. 6.17)
+            // --- EFFICIENT O(n²) BFGS Inverse Hessian Update ---
+            // The standard formula H_{k+1} = (I - ρ*s*y') * H_k * (I - ρ*y*s') + ρ*s*s'
+            // expands to: H_{k+1} = H_k - ρ*s*(y'*H_k) - ρ*(H_k*y)*s' + ρ²*(y'*H_k*y)*s*s' + ρ*s*s'
+            // This avoids O(n³) matrix-matrix multiplications by using matrix-vector and rank-1 operations
             let rho = 1.0 / sy;
-            let s_k_col = s_k.view().insert_axis(Axis(1));
-            let y_k_col = y_k.view().insert_axis(Axis(1));
-
-            let term1 = &Array2::<f64>::eye(n) - rho * s_k_col.dot(&y_k_col.t());
-            let term2 = &Array2::<f64>::eye(n) - rho * y_k_col.dot(&s_k_col.t());
-
-            b_inv = term1.dot(&b_inv).dot(&term2) + rho * s_k_col.dot(&s_k_col.t());
+            
+            // Compute H_k * y_k (matrix-vector product: O(n²))
+            let h_y = b_inv.dot(&y_k);
+            
+            // Compute y_k' * H_k (vector-matrix product: O(n²))
+            let y_h = y_k.dot(&b_inv);
+            
+            // Compute y_k' * H_k * y_k (scalar: O(n))
+            let y_h_y = y_k.dot(&h_y);
+            
+            // Apply the update using efficient rank-1 operations
+            // Each outer product is O(n²), avoiding O(n³) matrix multiplication
+            for i in 0..n {
+                for j in 0..n {
+                    b_inv[[i, j]] = b_inv[[i, j]] 
+                        - rho * s_k[i] * y_h[j]           // -ρ*s*(y'*H_k)
+                        - rho * h_y[i] * s_k[j]           // -ρ*(H_k*y)*s'
+                        + rho * rho * y_h_y * s_k[i] * s_k[j]  // +ρ²*(y'*H_k*y)*s*s'
+                        + rho * s_k[i] * s_k[j];          // +ρ*s*s'
+                }
+            }
 
             x_k += &s_k;
             f_k = f_next;
@@ -282,6 +297,7 @@ where
         // The sufficient decrease (Armijo) condition.
         if f_i > f_k + c1 * alpha_i * g_k_dot_d || (func_evals > 1 && f_i >= f_prev) {
             // The minimum is now bracketed between alpha_prev and alpha_i.
+            let g_i_dot_d = g_i.dot(d_k);
             return zoom(
                 obj_fn,
                 x_k,
@@ -293,7 +309,9 @@ where
                 alpha_prev,
                 alpha_i,
                 f_prev,
+                f_i,
                 g_prev_dot_d,
+                g_i_dot_d,
                 func_evals,
                 grad_evals,
             );
@@ -320,7 +338,9 @@ where
                 alpha_prev,
                 alpha_i,
                 f_prev,
+                f_i,
                 g_prev_dot_d,
+                g_i_dot_d,
                 func_evals,
                 grad_evals,
             );
@@ -352,7 +372,9 @@ fn zoom<ObjFn>(
     mut alpha_lo: f64,
     mut alpha_hi: f64,
     mut f_lo: f64,
+    mut f_hi: f64,
     mut g_lo_dot_d: f64,
+    mut g_hi_dot_d: f64,
     mut func_evals: usize,
     mut grad_evals: usize,
 ) -> Result<(f64, f64, Array1<f64>, usize, usize), BfgsError>
@@ -360,12 +382,6 @@ where
     ObjFn: Fn(&Array1<f64>) -> (f64, Array1<f64>),
 {
     let max_zoom_attempts = 10;
-
-    // Compute f_hi and g_hi_dot_d once initially
-    let (mut f_hi, g_hi) = obj_fn(&(x_k + alpha_hi * d_k));
-    func_evals += 1;
-    grad_evals += 1;
-    let mut g_hi_dot_d = g_hi.dot(d_k);
 
     for _ in 0..max_zoom_attempts {
         // Ensure alpha_lo < alpha_hi for stable interpolation.
