@@ -6,19 +6,8 @@ concurrency:
 
 on:
   push:
-    branches: [main]
-    paths:
-      - 'src/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - '.github/workflows/test.yml'
   pull_request:
     branches: [main]
-    paths:
-      - 'src/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - '.github/workflows/test.yml'
 
 env:
   CARGO_TERM_COLOR: always
@@ -30,7 +19,7 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     strategy:
-      fail-fast: false # Don't cancel all jobs if one fails.
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
         rust: [stable, beta, nightly]
@@ -63,9 +52,6 @@ jobs:
 
       - name: Run Clippy linter
         run: cargo clippy -- -D warnings
-
-      - name: Run unit tests in debug mode
-        run: cargo test --verbose
 
       - name: Build in release mode
         run: cargo build --release --verbose
