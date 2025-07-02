@@ -16,3 +16,4 @@ fn test_x_fourth_p_1000(bencher: &mut Bencher) {
         assert_eq!(x_min, Ok(Array1::zeros(p)));
     })
 }
+
