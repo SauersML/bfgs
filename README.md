@@ -1,31 +1,40 @@
-# bfgs
+# A Robust BFGS Implementation in Rust
 
-A pure Rust implementation of the [BFGS optimization algorithm](https://en.wikipedia.org/wiki/Broyden%E2%80%93Fletcher%E2%80%93Goldfarb%E2%80%93Shanno_algorithm) for unconstrained nonlinear optimization problems.
+[![Crates.io](https://img.shields.io/crates/v/wolfe-bfgs.svg)](https://crates.io/crates/wolfe-bfgs)
+[![Docs.rs](https://docs.rs/wolfe-bfgs/badge.svg)](https://docs.rs/wolfe-bfgs)
+[![Build Status](https://github.com/SauersML/bfgs/actions/workflows/test.yml/badge.svg)](https://github.com/SauersML/bfgs/actions)
+
+A pure Rust implementation of the dense BFGS optimization algorithm for unconstrained nonlinear problems. This library provides a powerful solver built upon the principles and best practices outlined in Nocedal & Wright's *Numerical Optimization*.
+
+This work is a rewrite of the original `bfgs` crate by Paul Kernfeld.
 
 ## Features
 
-- **Strong Wolfe Line Search**: Ensures stability and global convergence for convex problems
-- **Scaling Heuristic**: Improves convergence rate with intelligent initial Hessian approximation
-- **Ergonomic API**: Clean, configurable interface using the builder pattern
-- **Robust Error Handling**: Comprehensive error diagnostics with descriptive messages
-- **Well Tested**: Extensive test suite including comparison against SciPy's implementation
+*   **Strong Wolfe Line Search**: Guarantees stability and positive-definiteness of the Hessian approximation by satisfying the Strong Wolfe conditions. This ensures the crucial curvature condition `s_k^T y_k > 0` holds, making the algorithm reliable even for challenging functions.
+*   **Initial Hessian Scaling**: Implements the well-regarded scaling heuristic (Eq. 6.20 from Nocedal & Wright) to produce a well-scaled initial Hessian, often improving the rate of convergence.
+*   **Ergonomic API**: Uses the builder pattern for clear and flexible configuration of the solver.
+*   **Robust Error Handling**: Provides descriptive errors for common failure modes, such as line search failures or reaching the iteration limit, enabling better diagnostics.
+*   **Dense BFGS Implementation**: Stores the full `n x n` inverse Hessian approximation, suitable for small- to medium-scale optimization problems.
 
 ## Usage
 
-Add this to your `Cargo.toml`:
+First, add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-bfgs = "0.1.0"
+wolfe-bfgs = "0.1.0"
 ```
 
 ### Example: Minimizing the Rosenbrock Function
 
+Here is an example of minimizing the 2D Rosenbrock function, a classic benchmark for optimization algorithms.
+
 ```rust
-use bfgs::{Bfgs, BfgsSolution};
+use wolfe_bfgs::{Bfgs, BfgsSolution};
 use ndarray::{array, Array1};
 
-// Define the Rosenbrock function and its gradient
+// 1. Define the objective function and its gradient.
+// The function must return a tuple: (value, gradient).
 let rosenbrock = |x: &Array1<f64>| -> (f64, Array1<f64>) {
     let a = 1.0;
     let b = 100.0;
@@ -37,51 +46,51 @@ let rosenbrock = |x: &Array1<f64>| -> (f64, Array1<f64>) {
     (f, g)
 };
 
-// Set the initial guess
+// 2. Set the initial guess.
 let x0 = array![-1.2, 1.0];
 
-// Run the optimizer
-let BfgsSolution {
-    final_point: x_min,
-    final_value,
-    iterations,
-    ..
-} = Bfgs::new(x0, rosenbrock)
+// 3. Configure and run the solver.
+let solution = Bfgs::new(x0, rosenbrock)
     .with_tolerance(1e-6)
     .with_max_iterations(100)
     .run()
     .expect("BFGS failed to solve");
 
 println!(
-    "Found minimum f({}) = {:.4} in {} iterations.",
-    x_min, final_value, iterations
+    "Found minimum f({:.3}) = {:.4} in {} iterations.",
+    solution.final_point, solution.final_value, solution.iterations
 );
 
-// The known minimum is at [1.0, 1.0]
-assert!((x_min[0] - 1.0).abs() < 1e-5);
-assert!((x_min[1] - 1.0).abs() < 1e-5);
+// The known minimum is at [1.0, 1.0].
+assert!((solution.final_point[0] - 1.0).abs() < 1e-5);
+assert!((solution.final_point[1] - 1.0).abs() < 1e-5);
 ```
 
-## API
+## Algorithm Details
 
-The main entry point is the `Bfgs` struct, which uses the builder pattern for configuration:
+This crate implements the standard, dense BFGS algorithm. It is **not** a limited-memory (L-BFGS) implementation. The implementation closely follows the methods described in *Numerical Optimization* (2nd ed.) by Nocedal and Wright:
 
-- `Bfgs::new(x0, objective_function)` - Create a new optimizer
-- `.with_tolerance(tol)` - Set convergence tolerance (default: 1e-5)
-- `.with_max_iterations(max_iter)` - Set maximum iterations (default: 100)
-- `.run()` - Execute the optimization
+-   **BFGS Update**: The inverse Hessian `H_k` is updated using the standard formula (Eq. 6.17).
+-   **Line Search**: A backtracking line search is used to find a step length satisfying the Strong Wolfe conditions (Algorithm 3.5), with a `zoom` phase using cubic interpolation for refinement (Algorithm 3.6).
+-   **Initial Hessian**: A scaling heuristic is used to initialize the inverse Hessian before the first update (Eq. 6.20).
 
-The objective function should have the signature `Fn(&Array1<f64>) -> (f64, Array1<f64>)`, returning both the function value and its gradient.
+## Testing and Validation
 
-## Testing
+This library is tested against a suite of standard optimization benchmarks. The results are validated against `scipy.optimize.minimize(method='BFGS')` via a Python test harness.
 
-Run the test suite with:
-
+To run the full test suite:
 ```bash
-cargo test
+cargo test --release
 ```
 
-The tests include comparison against SciPy's BFGS implementation using a Python harness to ensure correctness.
+To run the benchmarks:
+```bash
+cargo bench
+```
+
+## Acknowledgements
+
+This crate is a fork and rewrite of the original [bfgs](https://github.com/paulkernfeld/bfgs) crate by **Paul Kernfeld**. The new version changes the API and replaces the original grid-search-based line search with an implementation based on the Strong Wolfe conditions.
 
 ## License
 
