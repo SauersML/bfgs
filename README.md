@@ -71,7 +71,7 @@ assert!((solution.final_point[1] - 1.0).abs() < 1e-5);
 This crate implements the standard, dense BFGS algorithm. It is **not** a limited-memory (L-BFGS) implementation. The implementation closely follows the methods described in *Numerical Optimization* (2nd ed.) by Nocedal and Wright:
 
 -   **BFGS Update**: The inverse Hessian `H_k` is updated using the standard formula (Eq. 6.17).
--   **Line Search**: A backtracking line search is used to find a step length satisfying the Strong Wolfe conditions (Algorithm 3.5), with a `zoom` phase using cubic interpolation for refinement (Algorithm 3.6).
+-   **Line Search**: A line search satisfying the Strong Wolfe conditions is implemented according to Algorithm 3.5 from the text. This involves a bracketing phase followed by a `zoom` phase (Algorithm 3.6) that uses cubic interpolation for efficient refinement.
 -   **Initial Hessian**: A scaling heuristic is used to initialize the inverse Hessian before the first update (Eq. 6.20).
 
 ## Testing and Validation
