@@ -13,4 +13,4 @@ edition = "2018"
 ndarray = "0.16.1"
 
 [dev-dependencies]
-spectral = "0.6"
+spectral = "0.6.0"
