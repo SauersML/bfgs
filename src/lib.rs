@@ -176,17 +176,16 @@ where
         // initial inverse Hessian used in the first formal iteration (k=1).
         let sy = s_0.dot(&y_0);
         let yy = y_0.dot(&y_0);
-        let b_inv = if sy > 0.0 && yy > 0.0 {
+        let mut b_inv = if sy > 0.0 && yy > 0.0 {
             Array2::<f64>::eye(n) * (sy / yy)
         } else {
             Array2::<f64>::eye(n) // Fallback to identity
         };
 
         // Update state to reflect the completion of the first step.
-        let mut x_k = x_k + s_0;
-        let mut f_k = f_1;
-        let mut g_k = g_1;
-        let mut b_inv = b_inv;
+        x_k += &s_0;
+        f_k = f_1;
+        g_k = g_1;
         // --- End of first iteration ---
 
         for k in 1..self.max_iterations {
@@ -361,7 +360,7 @@ where
 {
     let max_zoom_attempts = 10;
     for _ in 0..max_zoom_attempts {
-        // Ensure alpha_lo < alpha_hi
+        // Ensure alpha_lo < alpha_hi for stable interpolation.
         if alpha_lo > alpha_hi {
             std::mem::swap(&mut alpha_lo, &mut alpha_hi);
         }
