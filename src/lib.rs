@@ -1,4 +1,4 @@
-//! A robust, production-grade implementation of the BFGS optimization algorithm.
+//! An implementation of the BFGS optimization algorithm.
 //!
 //! This crate provides a solver for unconstrained nonlinear optimization problems,
 //! built upon the principles outlined in "Numerical Optimization" by Nocedal & Wright.
@@ -174,9 +174,6 @@ where
         let yy = y_0.dot(&y_0);
 
         b_inv = if sy > 0.0 && yy > 0.0 {
-            // Explicit type annotation `::<f64>` is a robust way to ensure the compiler
-            // infers the element type of the identity matrix, even if not strictly
-            // required here due to the type on `b_inv`.
             Array2::<f64>::eye(n) * (sy / yy)
         } else {
             Array2::<f64>::eye(n)
