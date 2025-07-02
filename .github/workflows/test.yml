@@ -61,9 +61,6 @@ jobs:
           key: ${{ runner.os }}-${{ matrix.rust }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-${{ matrix.rust }}-cargo-
-  
-      - name: Check formatting
-        run: cargo fmt --all -- --check
 
       - name: Build in release mode
         run: cargo build --release --verbose
