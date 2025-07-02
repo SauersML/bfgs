@@ -11,6 +11,7 @@ edition = "2018"
 
 [dependencies]
 ndarray = "0.16.1"
+thiserror = "2.0.12"
 
 [dev-dependencies]
 spectral = "0.6.0"
