@@ -52,3 +52,6 @@ jobs:
 
       - name: Run unit tests in release mode
         run: cargo test --release --verbose
+
+      - name: Run benchmarks
+        run: cargo bench --verbose
