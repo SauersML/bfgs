@@ -360,13 +360,13 @@ where
     ObjFn: Fn(&Array1<f64>) -> (f64, Array1<f64>),
 {
     let max_zoom_attempts = 10;
-    
+
     // Compute f_hi and g_hi_dot_d once initially
     let (mut f_hi, g_hi) = obj_fn(&(x_k + alpha_hi * d_k));
     func_evals += 1;
     grad_evals += 1;
     let mut g_hi_dot_d = g_hi.dot(d_k);
-    
+
     for _ in 0..max_zoom_attempts {
         // Ensure alpha_lo < alpha_hi for stable interpolation.
         if alpha_lo > alpha_hi {
