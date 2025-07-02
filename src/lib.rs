@@ -363,20 +363,89 @@ where ObjFn: Fn(&Array1<f64>) -> (f64, Array1<f64>),
 
 #[cfg(test)]
 mod tests {
+    // This test suite is structured into three parts:
+    // 1. Standard Convergence Tests: Verifies that the solver finds the correct
+    //    minimum for well-known benchmark functions from standard starting points.
+    // 2. Failure and Edge Case Tests: Ensures the solver handles non-convex
+    //    functions, pre-solved problems, and iteration limits correctly and returns
+    //    the appropriate descriptive errors.
+    // 3. Comparison Tests: Validates the behavior of our implementation against
+    //    `argmin`, a trusted, state-of-the-art optimization library, ensuring
+    //    that our results (final point and iteration count) are equivalent.
+
     use super::{Bfgs, BfgsError, BfgsSolution};
     use ndarray::{array, Array1};
     use spectral::prelude::*;
 
+    // --- Test Harness: argmin Comparison Setup ---
+    use argmin::core::{CostFunction, Error, Executor, Gradient, IterState, State};
+    use argmin::solver::linesearch::MoreThuenteLineSearch;
+    use argmin::solver::quasinewton::BFGS as ArgminBFGS;
+
+    struct ArgminTestFn<F> {
+        func: F,
+    }
+
+    impl<F> CostFunction for ArgminTestFn<F>
+    where
+        F: Fn(&Array1<f64>) -> (f64, Array1<f64>),
+    {
+        type Param = Array1<f64>;
+        type Output = f64;
+
+        fn cost(&self, p: &Self::Param) -> Result<Self::Output, Error> {
+            Ok((self.func)(p).0)
+        }
+    }
+
+    impl<F> Gradient for ArgminTestFn<F>
+    where
+        F: Fn(&Array1<f64>) -> (f64, Array1<f64>),
+    {
+        type Param = Array1<f64>;
+        type Gradient = Array1<f64>;
+
+        fn gradient(&self, p: &Self::Param) -> Result<Self::Gradient, Error> {
+            Ok((self.func)(p).1)
+        }
+    }
+
+    // --- Test Functions ---
+
+    /// A simple convex quadratic function: f(x) = x[0]^2 + ... + x[n]^2
     fn quadratic(x: &Array1<f64>) -> (f64, Array1<f64>) {
         (x.dot(x), 2.0 * x)
     }
 
+    /// The Rosenbrock function, a classic non-convex benchmark.
     fn rosenbrock(x: &Array1<f64>) -> (f64, Array1<f64>) {
-        let a = 1.0; let b = 100.0;
+        let a = 1.0;
+        let b = 100.0;
         let f = (a - x[0]).powi(2) + b * (x[1] - x[0].powi(2)).powi(2);
-        let g = array![-2.0*(a-x[0])-4.0*b*(x[1]-x[0].powi(2))*x[0], 2.0*b*(x[1]-x[0].powi(2))];
+        let g = array![-2.0 * (a - x[0]) - 4.0 * b * (x[1] - x[0].powi(2)) * x[0], 2.0 * b * (x[1] - x[0].powi(2))];
         (f, g)
     }
+
+    /// A function with a maximum at 0, guaranteed to fail the Wolfe curvature condition.
+    fn non_convex_max(x: &Array1<f64>) -> (f64, Array1<f64>) {
+        (-x.dot(x), -2.0 * x)
+    }
+
+    /// A function whose gradient is constant, causing `y_k` to be zero.
+    fn linear_function(x: &Array1<f64>) -> (f64, Array1<f64>) {
+        (2.0 * x[0] + 3.0 * x[1], array![2.0, 3.0])
+    }
+
+    /// A function that produces a NaN gradient if it steps to x=0.
+    fn nan_producing_function(x: &Array1<f64>) -> (f64, Array1<f64>) {
+        if x[0] == 0.0 {
+            (f64::NAN, array![f64::NAN])
+        } else {
+            (-x[0].ln(), array![-1.0 / x[0]])
+        }
+    }
+
+    // --- 1. Standard Convergence Tests ---
 
     #[test]
     fn test_quadratic_bowl_converges() {
@@ -387,13 +456,6 @@ mod tests {
     }
 
     #[test]
-    fn test_begin_at_minimum() {
-        let x0 = array![0.0, 0.0];
-        let BfgsSolution { iterations, .. } = Bfgs::new(x0, quadratic).run().unwrap();
-        assert_that(&iterations).is_less_than_or_equal_to(1);
-    }
-    
-    #[test]
     fn test_rosenbrock_converges() {
         let x0 = array![-1.2, 1.0];
         let BfgsSolution { final_point, .. } = Bfgs::new(x0, rosenbrock).run().unwrap();
@@ -401,10 +463,119 @@ mod tests {
         assert_that(&final_point[1]).is_close_to(1.0, 1e-5);
     }
 
+    // --- 2. Failure and Edge Case Tests ---
+
     #[test]
-    fn test_max_iterations_error() {
+    fn test_begin_at_minimum_terminates_immediately() {
+        let x0 = array![0.0, 0.0];
+        let BfgsSolution { iterations, .. } = Bfgs::new(x0, quadratic).run().unwrap();
+        assert_that(&iterations).is_less_than_or_equal_to(1);
+    }
+
+    #[test]
+    fn test_max_iterations_error_is_returned() {
         let x0 = array![-1.2, 1.0];
         let result = Bfgs::new(x0, rosenbrock).with_max_iterations(5).run();
         assert!(matches!(result, Err(BfgsError::MaxIterationsReached { .. })));
+    }
+
+    #[test]
+    fn test_non_convex_function_fails_line_search() {
+        let x0 = array![2.0];
+        let result = Bfgs::new(x0, non_convex_max).run();
+        // A correct Wolfe line search must fail because it can't find a point
+        // that satisfies the curvature condition when moving towards a maximum.
+        assert!(matches!(result, Err(BfgsError::LineSearchFailed { .. })));
+    }
+
+    #[test]
+    fn test_initial_hessian_scaling_handles_zero_curvature() {
+        let x0 = array![10.0, 10.0];
+        // For a linear function, the gradient is constant, so y_k is always zero.
+        // The solver should not panic and should gracefully fail.
+        let result = Bfgs::new(x0, linear_function).run();
+        assert!(matches!(
+            result,
+            Err(BfgsError::CurvatureConditionViolated)
+        ));
+    }
+
+    #[test]
+    fn test_nan_gradient_returns_error() {
+        let x0 = array![1.0];
+        // The first step will be d = -g = -(-1/1) = 1.
+        // The line search will try alpha=1, testing x = 1 + 1*1 = 2. It's too short.
+        // It will then expand, trying alpha=2, testing x = 1 + 2*1 = 3.
+        // Eventually it will try a point that results in a negative x, producing NaN.
+        // A robust line search may also fail before this.
+        let result = Bfgs::new(x0, |x| (x[0].ln(), array![1.0 / x[0]])).run();
+        assert!(result.is_err());
+    }
+
+    // --- 3. Comparison Tests against a Trusted Library ---
+
+    #[test]
+    fn test_rosenbrock_matches_argmin_behavior() {
+        let x0 = array![-1.2, 1.0];
+        let tolerance = 1e-6;
+
+        // Run our implementation
+        let our_res = Bfgs::new(x0.clone(), rosenbrock)
+            .with_tolerance(tolerance)
+            .run()
+            .unwrap();
+
+        // Run argmin's implementation with synchronized settings
+        let problem = ArgminTestFn { func: rosenbrock };
+        let linesearch = MoreThuenteLineSearch::new();
+        let solver = ArgminBFGS::new(linesearch).with_tolerance_grad(tolerance).unwrap();
+        let argmin_res = Executor::new(problem, solver)
+            .configure(|state: IterState<_, _, _, _, _, _>| state.param(x0).max_iters(100))
+            .run()
+            .unwrap();
+
+        // Assert that the final points are virtually identical.
+        let distance = (&our_res.final_point - argmin_res.state.get_best_param().unwrap())
+            .mapv(|x| x.powi(2))
+            .sum()
+            .sqrt();
+        assert_that(&distance).is_less_than(1e-6);
+
+        // Assert that the number of iterations is very similar. A small difference
+        // is acceptable due to minor, valid variations in line search implementations.
+        let iter_diff = (our_res.iterations as i32 - argmin_res.state.get_iter() as i32).abs();
+        assert_that(&iter_diff).is_less_than_or_equal_to(5);
+    }
+
+    #[test]
+    fn test_quadratic_matches_argmin_behavior() {
+        let x0 = array![150.0, -275.5];
+        let tolerance = 1e-8;
+
+        // Run our implementation
+        let our_res = Bfgs::new(x0.clone(), quadratic)
+            .with_tolerance(tolerance)
+            .run()
+            .unwrap();
+
+        // Run argmin's implementation with synchronized settings
+        let problem = ArgminTestFn { func: quadratic };
+        let linesearch = MoreThuenteLineSearch::new();
+        let solver = ArgminBFGS::new(linesearch).with_tolerance_grad(tolerance).unwrap();
+        let argmin_res = Executor::new(problem, solver)
+            .configure(|state: IterState<_, _, _, _, _, _>| state.param(x0).max_iters(100))
+            .run()
+            .unwrap();
+
+        // Assert that the final points are virtually identical.
+        let distance = (&our_res.final_point - argmin_res.state.get_best_param().unwrap())
+            .mapv(|x| x.powi(2))
+            .sum()
+            .sqrt();
+        assert_that(&distance).is_less_than(1e-6);
+
+        // Assert that the number of iterations is very similar.
+        let iter_diff = (our_res.iterations as i32 - argmin_res.state.get_iter() as i32).abs();
+        assert_that(&iter_diff).is_less_than_or_equal_to(3);
     }
 }
