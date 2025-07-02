@@ -147,8 +147,6 @@ where
         let mut func_evals = 1;
         let mut grad_evals = 1;
 
-        let mut b_inv: Array2<f64>;
-
         // --- Handle the first iteration separately for initial Hessian scaling ---
         // This logic is designed to produce a well-scaled initial Hessian
         // approximation `b_inv` (H_0) before entering the main loop.
@@ -164,7 +162,7 @@ where
             });
         }
 
-        // The first step uses the identity matrix as the initial Hessian guess.
+        // The first step uses the identity matrix as the implicit initial Hessian guess.
         let d_0 = -g_k.clone();
         let (alpha_0, f_1, g_1, f_evals, g_evals) =
             line_search(&self.obj_fn, &x_k, &d_0, f_k, &g_k, self.c1, self.c2)?;
@@ -178,16 +176,17 @@ where
         // initial inverse Hessian used in the first formal iteration (k=1).
         let sy = s_0.dot(&y_0);
         let yy = y_0.dot(&y_0);
-        b_inv = if sy > 0.0 && yy > 0.0 {
+        let b_inv = if sy > 0.0 && yy > 0.0 {
             Array2::<f64>::eye(n) * (sy / yy)
         } else {
             Array2::<f64>::eye(n) // Fallback to identity
         };
 
         // Update state to reflect the completion of the first step.
-        x_k += &s_0;
-        f_k = f_1;
-        g_k = g_1;
+        let mut x_k = x_k + s_0;
+        let mut f_k = f_1;
+        let mut g_k = g_1;
+        let mut b_inv = b_inv;
         // --- End of first iteration ---
 
         for k in 1..self.max_iterations {
@@ -252,8 +251,13 @@ where
 /// This implementation follows the structure of Algorithm 3.5 in Nocedal & Wright,
 /// with an efficient state-passing mechanism to avoid re-computation.
 fn line_search<ObjFn>(
-    obj_fn: &ObjFn, x_k: &Array1<f64>, d_k: &Array1<f64>, f_k: f64, g_k: &Array1<f64>,
-    c1: f64, c2: f64,
+    obj_fn: &ObjFn,
+    x_k: &Array1<f64>,
+    d_k: &Array1<f64>,
+    f_k: f64,
+    g_k: &Array1<f64>,
+    c1: f64,
+    c2: f64,
 ) -> Result<(f64, f64, Array1<f64>, usize, usize), BfgsError>
 where
     ObjFn: Fn(&Array1<f64>) -> (f64, Array1<f64>),
@@ -290,7 +294,6 @@ where
                 alpha_i,
                 f_prev,
                 g_prev_dot_d,
-                f_i,
                 func_evals,
                 grad_evals,
             );
@@ -318,7 +321,6 @@ where
                 alpha_i,
                 f_prev,
                 g_prev_dot_d,
-                f_i,
                 func_evals,
                 grad_evals,
             );
@@ -340,32 +342,49 @@ where
 /// a point satisfying the Strong Wolfe conditions is known.
 #[allow(clippy::too_many_arguments)]
 fn zoom<ObjFn>(
-    obj_fn: &ObjFn, x_k: &Array1<f64>, d_k: &Array1<f64>, f_k: f64, g_k_dot_d: f64,
-    c1: f64, c2: f64, mut alpha_lo: f64, mut alpha_hi: f64, mut f_lo: f64,
-    mut g_lo_dot_d: f64, f_hi: f64, mut func_evals: usize, mut grad_evals: usize,
+    obj_fn: &ObjFn,
+    x_k: &Array1<f64>,
+    d_k: &Array1<f64>,
+    f_k: f64,
+    g_k_dot_d: f64,
+    c1: f64,
+    c2: f64,
+    mut alpha_lo: f64,
+    mut alpha_hi: f64,
+    mut f_lo: f64,
+    mut g_lo_dot_d: f64,
+    mut func_evals: usize,
+    mut grad_evals: usize,
 ) -> Result<(f64, f64, Array1<f64>, usize, usize), BfgsError>
 where
     ObjFn: Fn(&Array1<f64>) -> (f64, Array1<f64>),
 {
     let max_zoom_attempts = 10;
     for _ in 0..max_zoom_attempts {
+        // Ensure alpha_lo < alpha_hi
+        if alpha_lo > alpha_hi {
+            std::mem::swap(&mut alpha_lo, &mut alpha_hi);
+        }
+
         // --- Cubic interpolation to find a trial step size `alpha_j` ---
-        // This finds the minimizer of a cubic polynomial that interpolates the function
-        // values and derivatives at alpha_lo and alpha_hi.
-        let (f_hi_eval, g_hi) = obj_fn(&(x_k + alpha_hi * d_k));
+        let (f_hi, g_hi) = obj_fn(&(x_k + alpha_hi * d_k));
         func_evals += 1;
         grad_evals += 1;
         let g_hi_dot_d = g_hi.dot(d_k);
-        let current_f_hi = f_hi_eval;
 
-        let d1 = g_lo_dot_d + g_hi_dot_d - 3.0 * (f_lo - current_f_hi) / (alpha_lo - alpha_hi);
+        let d1 = g_lo_dot_d + g_hi_dot_d - 3.0 * (f_lo - f_hi) / (alpha_lo - alpha_hi);
         let d2_sq = d1.powi(2) - g_lo_dot_d * g_hi_dot_d;
 
-        let alpha_j = if d2_sq.is_sign_positive() && (alpha_lo - alpha_hi).abs() > 1e-12 {
+        let alpha_j = if d2_sq.is_sign_positive() && (alpha_hi - alpha_lo).abs() > 1e-12 {
             let d2 = d2_sq.sqrt();
-            alpha_hi
+            let mut trial = alpha_hi
                 - (alpha_hi - alpha_lo) * (g_hi_dot_d + d2 - d1)
-                    / (g_hi_dot_d - g_lo_dot_d + 2.0 * d2)
+                    / (g_hi_dot_d - g_lo_dot_d + 2.0 * d2);
+            // If interpolation gives a point outside the bracket, bisect instead.
+            if trial < alpha_lo || trial > alpha_hi {
+                trial = (alpha_lo + alpha_hi) / 2.0;
+            }
+            trial
         } else {
             // Fallback to bisection if interpolation fails or interval is too small.
             (alpha_lo + alpha_hi) / 2.0
@@ -439,7 +458,7 @@ mod tests {
     use spectral::prelude::*;
 
     // --- Test Harness: argmin Comparison Setup ---
-    use argmin::core::{prelude::*, CostFunction, Error, Executor, Gradient, IterState, State};
+    use argmin::core::{prelude::*, CostFunction, Error, Executor, Gradient, IterState};
     use argmin::solver::linesearch::MoreThuenteLineSearch;
     use argmin::solver::quasinewton::BFGS as ArgminBFGS;
 
