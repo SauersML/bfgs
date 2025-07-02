@@ -365,6 +365,7 @@ where
     Err(BfgsError::LineSearchFailed { max_attempts })
 }
 
+
 /// Helper "zoom" function using cubic interpolation, as described by Nocedal & Wright (Alg. 3.6).
 ///
 /// This function is called when a bracketing interval [alpha_lo, alpha_hi] that contains
@@ -407,7 +408,7 @@ where
             let alpha_diff = alpha_hi - alpha_lo;
 
             // Fallback to bisection if the interval is too small or if function
-            // values at the interval ends are not finite, preventing unstable interpolation.
+            // values at the interval ends are infinite, preventing unstable interpolation.
             if alpha_diff < min_alpha_step || !f_lo.is_finite() || !f_hi.is_finite() {
                 (alpha_lo + alpha_hi) / 2.0
             } else {
@@ -447,17 +448,17 @@ where
         func_evals += 1;
         grad_evals += 1;
 
-        // If the objective function or gradient becomes non-finite at the trial
-        // point, the line search has entered an unstable region. This is
-        // considered a failure, as the algorithm cannot proceed reliably.
-        if !f_j.is_finite() || g_j.iter().any(|&v| !v.is_finite()) {
+        // A NaN value indicates a fatal numerical error (e.g., domain error)
+        // from which the optimizer cannot recover.
+        if f_j.is_nan() || g_j.iter().any(|&v| v.is_nan()) {
             return Err(BfgsError::LineSearchFailed {
                 max_attempts: max_zoom_attempts,
             });
         }
 
         // Check if the new point `alpha_j` satisfies the sufficient decrease condition.
-        if f_j > f_k + c1 * alpha_j * g_k_dot_d || f_j >= f_lo {
+        // An infinite `f_j` means the step was too large and failed the condition.
+        if !f_j.is_finite() || f_j > f_k + c1 * alpha_j * g_k_dot_d || f_j >= f_lo {
             // The new point is not good enough, shrink the interval from the high end.
             alpha_hi = alpha_j;
             f_hi = f_j;
@@ -470,22 +471,28 @@ where
                 return Ok((alpha_j, f_j, g_j, func_evals, grad_evals));
             }
 
-            // If derivative at alpha_j is positive, the minimum is in [alpha_lo, alpha_j].
-            if g_j_dot_d * (alpha_hi - alpha_lo) >= 0.0 {
-                alpha_hi = alpha_lo;
-                f_hi = f_lo;
-                g_hi_dot_d = g_lo_dot_d;
+            // The minimum is now bracketed by a point with a negative derivative
+            // (alpha_lo) and a point with a positive derivative (alpha_j).
+            if g_j_dot_d >= 0.0 {
+                // The new point has a positive derivative, so it becomes the new
+                // upper bound of the bracket. The new interval is [alpha_lo, alpha_j].
+                alpha_hi = alpha_j;
+                f_hi = f_j;
+                g_hi_dot_d = g_j_dot_d;
+            } else {
+                // The new point has a negative derivative, so it becomes the new
+                // lower bound of the bracket. The new interval is [alpha_j, alpha_hi].
+                alpha_lo = alpha_j;
+                f_lo = f_j;
+                g_lo_dot_d = g_j_dot_d;
             }
-            // If derivative at alpha_j is negative, the minimum is in [alpha_j, alpha_hi].
-            alpha_lo = alpha_j;
-            f_lo = f_j;
-            g_lo_dot_d = g_j_dot_d;
         }
     }
     Err(BfgsError::LineSearchFailed {
         max_attempts: max_zoom_attempts,
     })
 }
+
 
 #[cfg(test)]
 mod tests {
