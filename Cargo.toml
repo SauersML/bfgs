@@ -10,7 +10,7 @@ repository = "https://github.com/paulkernfeld/bfgs"
 edition = "2018"
 
 [dependencies]
-ndarray = "0.11"
+ndarray = "0.16.1"
 
 [dev-dependencies]
 spectral = "0.6"
