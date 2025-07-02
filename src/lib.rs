@@ -59,20 +59,7 @@
 //! assert!((x_min[1] - 1.0).abs() < 1e-5);
 //! ```
 
-use ndarray::{Array1, Array2};
-
-/// Computes the outer product of two vectors u and v, resulting in u * v^T
-fn outer_product(u: &Array1<f64>, v: &Array1<f64>) -> Array2<f64> {
-    let n = u.len();
-    let m = v.len();
-    let mut result = Array2::zeros((n, m));
-    for i in 0..n {
-        for j in 0..m {
-            result[[i, j]] = u[i] * v[j];
-        }
-    }
-    result
-}
+use ndarray::{Array1, Array2, Axis};
 
 /// An error type for clear diagnostics.
 #[derive(Debug, thiserror::Error)]
@@ -240,10 +227,8 @@ where
                 return Err(BfgsError::CurvatureConditionViolated);
             }
 
-            // --- EFFICIENT O(n²) BFGS Inverse Hessian Update ---
-            // The standard formula H_{k+1} = (I - ρ*s*y') * H_k * (I - ρ*y*s') + ρ*s*s'
-            // expands to: H_{k+1} = H_k - ρ*s*(y'*H_k) - ρ*(H_k*y)*s' + ρ²*(y'*H_k*y)*s*s' + ρ*s*s'
-            // Using ndarray's optimized operations for better performance than explicit loops
+            // --- EFFICIENT AND IDIOMATIC O(n²) BFGS INVERSE HESSIAN UPDATE ---
+            // Using ndarray's optimized operations with BLAS backend when available
             let rho = 1.0 / sy;
 
             // Compute H_k * y_k (matrix-vector product: O(n²))
@@ -252,17 +237,22 @@ where
             // Compute y_k' * H_k * y_k (scalar: O(n))
             let y_h_y = y_k.dot(&h_y);
 
-            // Apply the update using ndarray's optimized rank-1 operations
-            // This leverages BLAS-optimized routines when available, much faster than explicit loops
-            let s_hy_outer = outer_product(&s_k, &h_y);  // s * (H_k*y)'
-            let hy_s_outer = outer_product(&h_y, &s_k);  // (H_k*y) * s'
-            let s_s_outer = outer_product(&s_k, &s_k);   // s * s'
+            // Create outer products using ndarray's idiomatic insert_axis + dot technique
+            // This leverages optimized BLAS operations instead of manual loops
+            let s_k_col = s_k.view().insert_axis(Axis(1));
+            let s_k_row = s_k.view().insert_axis(Axis(0));
+            let h_y_col = h_y.view().insert_axis(Axis(1));
+            let h_y_row = h_y.view().insert_axis(Axis(0));
 
-            // Combine the rank-1 updates efficiently using vectorized operations
-            b_inv = &b_inv 
-                - rho * &s_hy_outer           // -ρ*s*(y'*H_k)  
-                - rho * &hy_s_outer           // -ρ*(H_k*y)*s'
-                + (rho * rho * y_h_y + rho) * &s_s_outer;  // (ρ²*(y'*H_k*y) + ρ)*s*s'
+            // Compute rank-1 update matrices using optimized outer products
+            let hy_s_outer = h_y_col.dot(&s_k_row);  // (H_k*y_k) * s_k'
+            let s_hy_outer = s_k_col.dot(&h_y_row);  // s_k * (H_k*y_k)'
+            let s_s_outer = s_k_col.dot(&s_k_row);   // s_k * s_k'
+
+            // Apply BFGS update using efficient in-place operations (BLAS axpy)
+            b_inv.scaled_add(-rho, &hy_s_outer);                    // b_inv -= ρ*(H_k*y)*s'
+            b_inv.scaled_add(-rho, &s_hy_outer);                    // b_inv -= ρ*s*(H_k*y)'
+            b_inv.scaled_add(rho * rho * y_h_y + rho, &s_s_outer);  // b_inv += (ρ²*(y'*H_k*y) + ρ)*s*s'
 
             x_k += &s_k;
             f_k = f_next;
