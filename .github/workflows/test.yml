@@ -11,14 +11,14 @@ on:
       - 'src/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
-      - '.github/workflows/ci.yml'
+      - '.github/workflows/test.yml'
   pull_request:
     branches: [main]
     paths:
       - 'src/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
-      - '.github/workflows/ci.yml'
+      - '.github/workflows/test.yml'
 
 env:
   CARGO_TERM_COLOR: always
