@@ -152,26 +152,34 @@ where
             });
         }
 
-        let d_0 = -g_k.clone();
+        let g_0 = g_k.clone(); // Preserve the initial gradient g_0.
+
+        let d_0 = -g_0.clone();
         let (alpha_0, f_1, g_1, f_evals, g_evals) =
-            line_search(&self.obj_fn, &x_k, &d_0, f_k, &g_k, self.c1, self.c2)?;
+            line_search(&self.obj_fn, &x_k, &d_0, f_k, &g_0, self.c1, self.c2)?;
         func_evals += f_evals;
         grad_evals += g_evals;
 
-        x_k = x_k + alpha_0 * d_0;
+        // Calculate the first step `s_0` and the change in gradient `y_0`.
+        let s_0 = alpha_0 * d_0;
+        let y_0 = &g_1 - &g_0;
+        
+        // Update state for the main loop.
+        x_k = x_k + &s_0;
         f_k = f_1;
         g_k = g_1;
-
-        let s_0 = alpha_0 * d_0;
-        let y_0 = &g_k - &g_k; // Note: g_k is now g_1
-
+        
+        // Apply the scaling heuristic for the initial inverse Hessian.
         let sy = s_0.dot(&y_0);
         let yy = y_0.dot(&y_0);
 
         b_inv = if sy > 0.0 && yy > 0.0 {
-            Array2::eye(n) * (sy / yy)
+            // Explicit type annotation `::<f64>` is a robust way to ensure the compiler
+            // infers the element type of the identity matrix, even if not strictly
+            // required here due to the type on `b_inv`.
+            Array2::<f64>::eye(n) * (sy / yy)
         } else {
-            Array2::eye(n)
+            Array2::<f64>::eye(n)
         };
         // --- End of first iteration ---
 
@@ -204,12 +212,18 @@ where
                 return Err(BfgsError::CurvatureConditionViolated);
             }
 
-            // --- The Correct BFGS Inverse Hessian Update Formula ---
+            // --- The BFGS Inverse Hessian Update Formula ---
+            // H_{k+1} = (I - ρ*s*yᵀ) * H_k * (I - ρ*y*sᵀ) + ρ*s*sᵀ
+            // This is derived from the Sherman-Morrison-Woodbury formula.
             let rho = 1.0 / sy;
-            let s_k_col = s_k.insert_axis(Axis(1));
-            let y_k_col = y_k.insert_axis(Axis(1));
+            let s_k_col = s_k.insert_axis(Axis(1)); // Convert from (n,) to (n, 1)
+            let y_k_col = y_k.insert_axis(Axis(1)); // Convert from (n,) to (n, 1)
 
-            let i_minus_rhosy = &Array2::eye(n) - rho * s_k_col.dot(&y_k_col.t());
+            // Explicit type annotation `::<f64>` is needed for the compiler to infer the
+            // element type of the identity matrix in this context.
+            let i_minus_rhosy = &Array2::<f64>::eye(n) - rho * s_k_col.dot(&y_k_col.t());
+
+            // The term `(I - ρ*y*sᵀ)` is the transpose of `(I - ρ*s*yᵀ)`.
             b_inv = i_minus_rhosy.dot(&b_inv).dot(&i_minus_rhosy.t()) + rho * s_k_col.dot(&s_k_col.t());
             
             x_k = x_k + s_k;
@@ -222,103 +236,124 @@ where
 }
 
 /// A line search algorithm that finds a step size satisfying the Strong Wolfe conditions.
+///
+/// This implementation follows the structure of Algorithm 3.5 in Nocedal & Wright.
 fn line_search<ObjFn>(
     obj_fn: ObjFn, x_k: &Array1<f64>, d_k: &Array1<f64>, f_k: f64, g_k: &Array1<f64>,
     c1: f64, c2: f64,
 ) -> Result<(f64, f64, Array1<f64>, usize, usize), BfgsError>
 where ObjFn: Fn(&Array1<f64>) -> (f64, Array1<f64>),
 {
-    let mut alpha_star = 1.0; // Start with a unit step size.
+    let mut alpha_i = 1.0; // Per Nocedal & Wright, always start with a unit step.
     let mut alpha_prev = 0.0;
+
     let mut f_prev = f_k;
-    let mut g_prev_dot_d = g_k.dot(d_k);
-    
+    let g_k_dot_d = g_k.dot(d_k); // Initial derivative along the search direction. This is constant.
+
     let max_attempts = 20;
     let mut func_evals = 0;
     let mut grad_evals = 0;
 
-    for i in 0..max_attempts {
-        let x_new = x_k + alpha_star * d_k;
-        let (f_star, g_star) = obj_fn(&x_new);
+    for _ in 0..max_attempts {
+        let x_new = x_k + alpha_i * d_k;
+        let (f_i, g_i) = obj_fn(&x_new);
         func_evals += 1;
         grad_evals += 1;
-
-        if f_star > f_k + c1 * alpha_star * g_prev_dot_d {
-            // Sufficient decrease condition not met.
-            return zoom(obj_fn, x_k, d_k, f_k, g_k, c1, c2,
-                        alpha_prev, alpha_star, f_prev, f_star, g_prev_dot_d,
+        
+        // The sufficient decrease (Armijo) condition.
+        if f_i > f_k + c1 * alpha_i * g_k_dot_d || (func_evals > 1 && f_i >= f_prev) {
+            let (g_prev, _) = obj_fn(&(x_k + alpha_prev * d_k)); // Re-eval to get g_prev if needed
+            grad_evals += 1;
+            return zoom(obj_fn, x_k, d_k, f_k, g_k_dot_d, c1, c2,
+                        alpha_prev, alpha_i, f_prev, g_prev.dot(d_k), f_i,
                         func_evals, grad_evals);
         }
 
-        let g_star_dot_d = g_star.dot(d_k);
-        if g_star_dot_d.abs() <= c2 * g_prev_dot_d.abs() {
-            // Strong Wolfe conditions satisfied.
-            return Ok((alpha_star, f_star, g_star, func_evals, grad_evals));
+        let g_i_dot_d = g_i.dot(d_k);
+        // The curvature condition.
+        if g_i_dot_d.abs() <= c2 * g_k_dot_d.abs() {
+            // Strong Wolfe conditions are satisfied.
+            return Ok((alpha_i, f_i, g_i, func_evals, grad_evals));
         }
 
-        if g_star_dot_d >= 0.0 {
-            // Curvature is now positive, minimum is bracketed.
-            return zoom(obj_fn, x_k, d_k, f_k, g_k, c1, c2,
-                        alpha_star, alpha_prev, f_star, f_prev, g_star.dot(d_k),
+        if g_i_dot_d >= 0.0 {
+            // The minimum is bracketed between alpha_prev and alpha_i.
+            return zoom(obj_fn, x_k, d_k, f_k, g_k_dot_d, c1, c2,
+                        alpha_i, alpha_prev, f_i, g_i_dot_d, f_prev,
                         func_evals, grad_evals);
         }
 
-        // Step is too short, expand the search.
-        alpha_prev = alpha_star;
-        f_prev = f_star;
-        g_prev_dot_d = g_star_dot_d;
-        alpha_star *= 2.0; // Simple expansion, could be more aggressive.
+        // The step is too short, expand the search interval.
+        alpha_prev = alpha_i;
+        f_prev = f_i;
+        alpha_i *= 2.0;
     }
 
     Err(BfgsError::LineSearchFailed { max_attempts })
 }
 
-/// Helper "zoom" function using cubic interpolation, as described by Nocedal & Wright.
+/// Helper "zoom" function using cubic interpolation, as described by Nocedal & Wright (Alg. 3.6).
+///
+/// This function is called when a bracketing interval [alpha_lo, alpha_hi] that contains
+/// a point satisfying the Strong Wolfe conditions is known.
 #[allow(clippy::too_many_arguments)]
 fn zoom<ObjFn>(
-    obj_fn: ObjFn, x_k: &Array1<f64>, d_k: &Array1<f64>, f_k: f64, g_k: &Array1<f64>,
-    c1: f64, c2: f64, mut alpha_lo: f64, mut alpha_hi: f64, mut f_lo: f64, _f_hi: f64,
-    mut g_lo_dot_d: f64, mut func_evals: usize, mut grad_evals: usize,
+    obj_fn: ObjFn, x_k: &Array1<f64>, d_k: &Array1<f64>, f_k: f64, g_k_dot_d: f64,
+    c1: f64, c2: f64, mut alpha_lo: f64, mut alpha_hi: f64, mut f_lo: f64,
+    mut g_lo_dot_d: f64, f_hi: f64, mut func_evals: usize, mut grad_evals: usize,
 ) -> Result<(f64, f64, Array1<f64>, usize, usize), BfgsError>
 where ObjFn: Fn(&Array1<f64>) -> (f64, Array1<f64>),
 {
-    let g_k_dot_d = g_k.dot(d_k);
     let max_zoom_attempts = 10;
     for _ in 0..max_zoom_attempts {
-        // --- Cubic interpolation to find a trial step size ---
-        let d1 = g_lo_dot_d + g_k_dot_d - 3.0 * (f_lo - f_k) / (alpha_lo - 0.0);
-        let d2_sq = d1.powi(2) - g_lo_dot_d * g_k_dot_d;
-
-        let alpha = if d2_sq >= 0.0 {
+        // --- Cubic interpolation to find a trial step size `alpha_j` ---
+        // This finds the minimizer of a cubic polynomial that interpolates the function
+        // values and derivatives at alpha_lo and alpha_hi.
+        let (g_hi, _) = obj_fn(&(x_k + alpha_hi * d_k));
+        grad_evals += 1;
+        let g_hi_dot_d = g_hi.dot(d_k);
+        
+        let d1 = g_lo_dot_d + g_hi_dot_d - 3.0 * (f_lo - f_hi) / (alpha_lo - alpha_hi);
+        let d2_sq = d1.powi(2) - g_lo_dot_d * g_hi_dot_d;
+        
+        let alpha_j = if d2_sq.is_sign_positive() {
             let d2 = d2_sq.sqrt();
-            alpha_lo - (alpha_lo) * (g_k_dot_d + d2 - d1) / (g_k_dot_d - g_lo_dot_d + 2.0 * d2)
+            alpha_hi - (alpha_hi - alpha_lo) * (g_hi_dot_d + d2 - d1) / (g_hi_dot_d - g_lo_dot_d + 2.0 * d2)
         } else {
-            // Fallback to bisection if interpolation fails
+            // Fallback to bisection if interpolation fails or is not applicable.
             (alpha_lo + alpha_hi) / 2.0
         };
 
-        let x_new = x_k + alpha * d_k;
-        let (f_new, g_new) = obj_fn(&x_new);
+        let x_j = x_k + alpha_j * d_k;
+        let (f_j, g_j) = obj_fn(&x_j);
         func_evals += 1;
         grad_evals += 1;
 
-        if f_new > f_k + c1 * alpha * g_k_dot_d || f_new >= f_lo {
-            alpha_hi = alpha;
+        // Check if the new point `alpha_j` satisfies the sufficient decrease condition.
+        if f_j > f_k + c1 * alpha_j * g_k_dot_d || f_j >= f_lo {
+            // The new point is not good enough, shrink the interval from the high end.
+            alpha_hi = alpha_j;
         } else {
-            let g_new_dot_d = g_new.dot(d_k);
-            if g_new_dot_d.abs() <= c2 * g_k_dot_d.abs() {
-                return Ok((alpha, f_new, g_new, func_evals, grad_evals));
+            let g_j_dot_d = g_j.dot(d_k);
+            // Check the curvature condition.
+            if g_j_dot_d.abs() <= c2 * g_k_dot_d.abs() {
+                // Success: Strong Wolfe conditions are met.
+                return Ok((alpha_j, f_j, g_j, func_evals, grad_evals));
             }
-            if g_new_dot_d * (alpha_hi - alpha_lo) >= 0.0 {
+
+            if g_j_dot_d * (alpha_hi - alpha_lo) >= 0.0 {
                 alpha_hi = alpha_lo;
             }
-            alpha_lo = alpha;
-            f_lo = f_new;
-            g_lo_dot_d = g_new_dot_d;
+            // The new point is good, but doesn't satisfy curvature yet.
+            // Shrink the interval from the low end.
+            alpha_lo = alpha_j;
+            f_lo = f_j;
+            g_lo_dot_d = g_j_dot_d;
         }
     }
     Err(BfgsError::LineSearchFailed { max_attempts: max_zoom_attempts })
 }
+
 
 #[cfg(test)]
 mod tests {
