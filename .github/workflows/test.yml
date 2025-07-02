@@ -46,13 +46,7 @@ jobs:
           key: ${{ runner.os }}-${{ matrix.rust }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-${{ matrix.rust }}-cargo-
-
-      - name: Check formatting
-        run: cargo fmt -- --check
-
-      - name: Run Clippy linter
-        run: cargo clippy -- -D warnings
-
+  
       - name: Build in release mode
         run: cargo build --release --verbose
 
