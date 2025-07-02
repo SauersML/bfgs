@@ -298,16 +298,14 @@ where
         func_evals += 1;
         grad_evals += 1;
 
-        // If the objective function returns non-finite values, the line search has
-        // entered an unstable region and cannot proceed. The Wolfe conditions are
-        // not well-defined for non-finite inputs.
-        if !f_i.is_finite() || g_i.iter().any(|&v| !v.is_finite()) {
-            return Err(BfgsError::LineSearchFailed { max_attempts });
-        }
-
-        // The sufficient decrease (Armijo) condition.
-        if f_i > f_k + c1 * alpha_i * g_k_dot_d || (func_evals > 1 && f_i >= f_prev) {
+        // The sufficient decrease (Armijo) condition. A non-finite value for `f_i`
+        // indicates that the step `alpha_i` is too large, so it's treated as a
+        // failure of this condition, triggering the zoom phase.
+        if !f_i.is_finite() || f_i > f_k + c1 * alpha_i * g_k_dot_d || (func_evals > 1 && f_i >= f_prev)
+        {
             // The minimum is now bracketed between alpha_prev and alpha_i.
+            // A non-finite gradient from a non-finite function value is handled
+            // robustly by the zoom function.
             let g_i_dot_d = g_i.dot(d_k);
             return zoom(
                 obj_fn,
@@ -370,7 +368,8 @@ where
 /// Helper "zoom" function using cubic interpolation, as described by Nocedal & Wright (Alg. 3.6).
 ///
 /// This function is called when a bracketing interval [alpha_lo, alpha_hi] that contains
-/// a point satisfying the Strong Wolfe conditions is known.
+/// a point satisfying the Strong Wolfe conditions is known. It iteratively refines this
+/// interval until a suitable step size is found.
 #[allow(clippy::too_many_arguments)]
 fn zoom<ObjFn>(
     obj_fn: &ObjFn,
@@ -393,38 +392,51 @@ where
     ObjFn: Fn(&Array1<f64>) -> (f64, Array1<f64>),
 {
     let max_zoom_attempts = 10;
+    let min_alpha_step = 1e-12; // Prevents division by zero or degenerate steps.
 
     for _ in 0..max_zoom_attempts {
-        // Ensure alpha_lo < alpha_hi for stable interpolation.
-        if alpha_lo > alpha_hi {
-            std::mem::swap(&mut alpha_lo, &mut alpha_hi);
-            std::mem::swap(&mut f_lo, &mut f_hi);
-            std::mem::swap(&mut g_lo_dot_d, &mut g_hi_dot_d);
-        }
-
-        // --- Cubic interpolation to find a trial step size `alpha_j` ---
-
-        let d1 = g_lo_dot_d + g_hi_dot_d - 3.0 * (f_lo - f_hi) / (alpha_lo - alpha_hi);
-        let d2_sq = d1.powi(2) - g_lo_dot_d * g_hi_dot_d;
-
-        let alpha_j = if d2_sq.is_sign_positive() && (alpha_hi - alpha_lo).abs() > 1e-12 {
-            let d2 = d2_sq.sqrt();
-            let mut trial = alpha_hi
-                - (alpha_hi - alpha_lo) * (g_hi_dot_d + d2 - d1)
-                    / (g_hi_dot_d - g_lo_dot_d + 2.0 * d2);
-            // If interpolation gives a NaN, a non-finite value, or a point outside
-            // the bracket, fall back to bisection.
-            if !trial.is_finite() || trial < alpha_lo || trial > alpha_hi {
-                trial = (alpha_lo + alpha_hi) / 2.0;
+        // --- Use cubic interpolation to find a trial step size `alpha_j` ---
+        let alpha_j = {
+            // Ensure alpha_lo < alpha_hi for stable interpolation.
+            if alpha_lo > alpha_hi {
+                std::mem::swap(&mut alpha_lo, &mut alpha_hi);
+                std::mem::swap(&mut f_lo, &mut f_hi);
+                std::mem::swap(&mut g_lo_dot_d, &mut g_hi_dot_d);
             }
-            trial
-        } else {
-            // Fallback to bisection if interpolation fails or interval is too small.
-            (alpha_lo + alpha_hi) / 2.0
+
+            let alpha_diff = alpha_hi - alpha_lo;
+
+            // Fallback to bisection if the interval is too small or if function
+            // values at the interval ends are not finite, preventing unstable interpolation.
+            if alpha_diff < min_alpha_step || !f_lo.is_finite() || !f_hi.is_finite() {
+                (alpha_lo + alpha_hi) / 2.0
+            } else {
+                let d1 = g_lo_dot_d + g_hi_dot_d - 3.0 * (f_hi - f_lo) / alpha_diff;
+                let d2_sq = d1.powi(2) - g_lo_dot_d * g_hi_dot_d;
+
+                if d2_sq.is_sign_positive() {
+                    let d2 = d2_sq.sqrt();
+                    let trial = alpha_hi
+                        - alpha_diff * (g_hi_dot_d + d2 - d1)
+                            / (g_hi_dot_d - g_lo_dot_d + 2.0 * d2);
+
+                    // If interpolation gives a non-finite value or a point outside
+                    // the bracket, fall back to bisection.
+                    if !trial.is_finite() || trial < alpha_lo || trial > alpha_hi {
+                        (alpha_lo + alpha_hi) / 2.0
+                    } else {
+                        trial
+                    }
+                } else {
+                    (alpha_lo + alpha_hi) / 2.0
+                }
+            }
         };
 
-        // If alpha_j is not making progress, bisect instead.
-        let alpha_j = if (alpha_j - alpha_lo).abs() < 1e-12 || (alpha_j - alpha_hi).abs() < 1e-12 {
+        // If the trial step is not making sufficient progress, bisect instead.
+        let alpha_j = if (alpha_j - alpha_lo).abs() < min_alpha_step
+            || (alpha_j - alpha_hi).abs() < min_alpha_step
+        {
             (alpha_lo + alpha_hi) / 2.0
         } else {
             alpha_j
@@ -435,17 +447,9 @@ where
         func_evals += 1;
         grad_evals += 1;
 
-        // If the objective function returns non-finite values, the line search has
-        // entered an unstable region and cannot proceed. The Wolfe conditions are
-        // not well-defined for non-finite inputs.
-        if !f_j.is_finite() || g_j.iter().any(|&v| !v.is_finite()) {
-            return Err(BfgsError::LineSearchFailed {
-                max_attempts: max_zoom_attempts,
-            });
-        }
-
         // Check if the new point `alpha_j` satisfies the sufficient decrease condition.
-        if f_j > f_k + c1 * alpha_j * g_k_dot_d || f_j >= f_lo {
+        // A non-finite value for `f_j` indicates `alpha_j` is too high.
+        if !f_j.is_finite() || f_j > f_k + c1 * alpha_j * g_k_dot_d || f_j >= f_lo {
             // The new point is not good enough, shrink the interval from the high end.
             alpha_hi = alpha_j;
             f_hi = f_j;
@@ -458,13 +462,13 @@ where
                 return Ok((alpha_j, f_j, g_j, func_evals, grad_evals));
             }
 
-            // If derivative at alpha_j is positive, the minimum is in [alpha_lo, alpha_j]
+            // If derivative at alpha_j is positive, the minimum is in [alpha_lo, alpha_j].
             if g_j_dot_d >= 0.0 {
                 alpha_hi = alpha_j;
                 f_hi = f_j;
                 g_hi_dot_d = g_j_dot_d;
             } else {
-                // If derivative at alpha_j is negative, the minimum is in [alpha_j, alpha_hi]
+                // If derivative at alpha_j is negative, the minimum is in [alpha_j, alpha_hi].
                 alpha_lo = alpha_j;
                 f_lo = f_j;
                 g_lo_dot_d = g_j_dot_d;
