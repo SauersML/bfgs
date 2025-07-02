@@ -459,8 +459,7 @@ mod tests {
 
     // --- Test Harness: Python scipy.optimize Comparison Setup ---
     use std::process::Command;
-    use serde_json;
-    
+
     #[derive(serde::Deserialize)]
     #[allow(dead_code)]
     struct PythonOptResult {
@@ -474,30 +473,38 @@ mod tests {
         message: Option<String>,
         error: Option<String>,
     }
-    
+
     /// Call Python optimization harness and return the result
-    fn optimize_with_python(x0: &Array1<f64>, function_name: &str, tolerance: f64, max_iterations: usize) -> Result<PythonOptResult, String> {
+    fn optimize_with_python(
+        x0: &Array1<f64>,
+        function_name: &str,
+        tolerance: f64,
+        max_iterations: usize,
+    ) -> Result<PythonOptResult, String> {
         let input_json = serde_json::json!({
             "x0": x0.to_vec(),
             "function": function_name,
             "tolerance": tolerance,
             "max_iterations": max_iterations
         });
-        
+
         let output = Command::new("python3")
             .arg("optimization_harness.py")
             .arg(input_json.to_string())
             .current_dir(".")
             .output()
             .map_err(|e| format!("Failed to execute Python script: {}", e))?;
-            
+
         if !output.status.success() {
-            return Err(format!("Python script failed: {}", String::from_utf8_lossy(&output.stderr)));
+            return Err(format!(
+                "Python script failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ));
         }
-        
+
         let result_str = String::from_utf8(output.stdout)
             .map_err(|e| format!("Invalid UTF-8 in Python output: {}", e))?;
-            
+
         serde_json::from_str(&result_str)
             .map_err(|e| format!("Failed to parse Python result: {}", e))
     }
@@ -554,10 +561,8 @@ mod tests {
     #[test]
     fn test_begin_at_minimum_terminates_immediately() {
         let x0 = array![0.0, 0.0];
-        let BfgsSolution { iterations, .. } = Bfgs::new(x0, quadratic)
-            .with_tolerance(1e-5)
-            .run()
-            .unwrap();
+        let BfgsSolution { iterations, .. } =
+            Bfgs::new(x0, quadratic).with_tolerance(1e-5).run().unwrap();
         assert_that(&iterations).is_less_than_or_equal_to(1);
     }
 
@@ -608,13 +613,16 @@ mod tests {
         // Start at a point that will converge towards 0, triggering the NaN condition.
         let x0 = array![0.1];
         let result = Bfgs::new(x0, nan_fn)
-            .with_tolerance(1e-15)  // Very tight tolerance to force convergence towards 0
+            .with_tolerance(1e-15) // Very tight tolerance to force convergence towards 0
             .run();
 
         // The solver should detect the NaN gradient and fail gracefully.
         // Accept either GradientIsNaN or LineSearchFailed since NaN during line search
         // can cause either error depending on where it's detected.
-        assert!(matches!(result, Err(BfgsError::GradientIsNaN) | Err(BfgsError::LineSearchFailed { .. })));
+        assert!(matches!(
+            result,
+            Err(BfgsError::GradientIsNaN) | Err(BfgsError::LineSearchFailed { .. })
+        ));
     }
 
     // --- 3. Comparison Tests against a Trusted Library ---
@@ -634,12 +642,17 @@ mod tests {
         let scipy_res = optimize_with_python(&x0, "rosenbrock", tolerance, 100)
             .expect("Python optimization failed");
 
-        assert!(scipy_res.success, "Scipy optimization failed: {:?}", scipy_res.error);
+        assert!(
+            scipy_res.success,
+            "Scipy optimization failed: {:?}",
+            scipy_res.error
+        );
         let scipy_point = scipy_res.final_point.unwrap();
 
         // Assert that the final points are virtually identical.
-        let distance = ((our_res.final_point[0] - scipy_point[0]).powi(2) +
-                       (our_res.final_point[1] - scipy_point[1]).powi(2)).sqrt();
+        let distance = ((our_res.final_point[0] - scipy_point[0]).powi(2)
+            + (our_res.final_point[1] - scipy_point[1]).powi(2))
+        .sqrt();
         assert_that!(&distance).is_less_than(1e-5);
 
         // Assert that the number of iterations is very similar. A small difference
@@ -663,12 +676,17 @@ mod tests {
         let scipy_res = optimize_with_python(&x0, "quadratic", tolerance, 100)
             .expect("Python optimization failed");
 
-        assert!(scipy_res.success, "Scipy optimization failed: {:?}", scipy_res.error);
+        assert!(
+            scipy_res.success,
+            "Scipy optimization failed: {:?}",
+            scipy_res.error
+        );
         let scipy_point = scipy_res.final_point.unwrap();
 
         // Assert that the final points are virtually identical.
-        let distance = ((our_res.final_point[0] - scipy_point[0]).powi(2) +
-                       (our_res.final_point[1] - scipy_point[1]).powi(2)).sqrt();
+        let distance = ((our_res.final_point[0] - scipy_point[0]).powi(2)
+            + (our_res.final_point[1] - scipy_point[1]).powi(2))
+        .sqrt();
         assert_that!(&distance).is_less_than(1e-6);
 
         // Assert that the number of iterations is very similar.
