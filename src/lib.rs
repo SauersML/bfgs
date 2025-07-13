@@ -210,7 +210,22 @@ where
 
             let d_k = -b_inv.dot(&g_k);
             let (alpha_k, f_next, g_next, f_evals, g_evals) =
-                line_search(&self.obj_fn, &x_k, &d_k, f_k, &g_k, self.c1, self.c2)?;
+                match line_search(&self.obj_fn, &x_k, &d_k, f_k, &g_k, self.c1, self.c2) {
+                    Ok(result) => result,
+                    Err(_) => {
+                        // --- FAILSAFE HESSIAN RESET ---
+                        // The line search failed, indicating the search direction is poor
+                        // and the Hessian approximation is likely corrupt. Resetting is the
+                        // best recovery strategy. This is triggered when the cautious update
+                        // mechanism is insufficient to prevent Hessian ill-conditioning.
+                        b_inv = Array2::<f64>::eye(n);
+
+                        // Retry the step with a steepest descent direction.
+                        let d_k_new = -g_k.clone();
+                        // If this also fails, the problem is likely intractable.
+                        line_search(&self.obj_fn, &x_k, &d_k_new, f_k, &g_k, self.c1, self.c2)?
+                    }
+                };
             func_evals += f_evals;
             grad_evals += g_evals;
 
@@ -222,37 +237,57 @@ where
             // A valid Wolfe line search should always ensure sy > 0.
             // This check is a safeguard against potential floating-point issues or
             // if a non-Wolfe line search were ever used.
-            // Use a more lenient tolerance for numerical stability near convergence.
             if sy <= 1e-14 {
                 return Err(BfgsError::CurvatureConditionViolated);
             }
 
-            // --- EFFICIENT AND IDIOMATIC O(n²) BFGS INVERSE HESSIAN UPDATE ---
-            // Using ndarray's optimized operations with BLAS backend when available
-            let rho = 1.0 / sy;
+            // --- CAUTIOUS UPDATE (Li & Fukushima, as reviewed by Gill & Runnoe) ---
+            // This is a robust alternative to simple Hessian resetting. We only perform the
+            // BFGS update if the curvature information is deemed reliable, preventing
+            // the Hessian approximation from being corrupted by noisy or poor-quality steps.
+            let s_k_norm_sq = s_k.dot(&s_k);
 
-            // Compute H_k * y_k (matrix-vector product: O(n²))
-            let h_y = b_inv.dot(&y_k);
+            // The condition is `(y_kᵀs_k) / ||s_k||² ≥ ε ||g_k||^γ`.
+            // We use the recommended parameters ε=1e-6 and γ=1.
+            let perform_update = if s_k_norm_sq > 1e-16 {
+                let avg_curvature = sy / s_k_norm_sq;
+                let threshold = 1e-6 * g_norm; // Using gamma = 1
+                avg_curvature >= threshold
+            } else {
+                // Step was too small to provide meaningful curvature; do not update.
+                false
+            };
 
-            // Compute y_k' * H_k * y_k (scalar: O(n))
-            let y_h_y = y_k.dot(&h_y);
+            if perform_update {
+                // --- EFFICIENT AND IDIOMATIC O(n²) BFGS INVERSE HESSIAN UPDATE ---
+                // Using ndarray's optimized operations with BLAS backend when available
+                let rho = 1.0 / sy;
 
-            // Create outer products using ndarray's idiomatic insert_axis + dot technique
-            // This leverages optimized BLAS operations instead of manual loops
-            let s_k_col = s_k.view().insert_axis(Axis(1));
-            let s_k_row = s_k.view().insert_axis(Axis(0));
-            let h_y_col = h_y.view().insert_axis(Axis(1));
-            let h_y_row = h_y.view().insert_axis(Axis(0));
+                // Compute H_k * y_k (matrix-vector product: O(n²))
+                let h_y = b_inv.dot(&y_k);
 
-            // Compute rank-1 update matrices using optimized outer products
-            let hy_s_outer = h_y_col.dot(&s_k_row);  // (H_k*y_k) * s_k'
-            let s_hy_outer = s_k_col.dot(&h_y_row);  // s_k * (H_k*y_k)'
-            let s_s_outer = s_k_col.dot(&s_k_row);   // s_k * s_k'
+                // Compute y_k' * H_k * y_k (scalar: O(n))
+                let y_h_y = y_k.dot(&h_y);
 
-            // Apply BFGS update using efficient in-place operations (BLAS axpy)
-            b_inv.scaled_add(-rho, &hy_s_outer);                    // b_inv -= ρ*(H_k*y)*s'
-            b_inv.scaled_add(-rho, &s_hy_outer);                    // b_inv -= ρ*s*(H_k*y)'
-            b_inv.scaled_add(rho * rho * y_h_y + rho, &s_s_outer);  // b_inv += (ρ²*(y'*H_k*y) + ρ)*s*s'
+                // Create outer products using ndarray's idiomatic insert_axis + dot technique
+                // This leverages optimized BLAS operations instead of manual loops
+                let s_k_col = s_k.view().insert_axis(Axis(1));
+                let s_k_row = s_k.view().insert_axis(Axis(0));
+                let h_y_col = h_y.view().insert_axis(Axis(1));
+                let h_y_row = h_y.view().insert_axis(Axis(0));
+
+                // Compute rank-1 update matrices using optimized outer products
+                let hy_s_outer = h_y_col.dot(&s_k_row);  // (H_k*y_k) * s_k'
+                let s_hy_outer = s_k_col.dot(&h_y_row);  // s_k * (H_k*y_k)'
+                let s_s_outer = s_k_col.dot(&s_k_row);   // s_k * s_k'
+
+                // Apply BFGS update using efficient in-place operations (BLAS axpy)
+                b_inv.scaled_add(-rho, &hy_s_outer);                    // b_inv -= ρ*(H_k*y)*s'
+                b_inv.scaled_add(-rho, &s_hy_outer);                    // b_inv -= ρ*s*(H_k*y)'
+                b_inv.scaled_add(rho * rho * y_h_y + rho, &s_s_outer);  // b_inv += (ρ²*(y'*H_k*y) + ρ)*s*s'
+            }
+            // If `perform_update` is false, we "skip" the update by doing nothing,
+            // preserving the existing `b_inv`. This is the "cautious" part of the algorithm.
 
             x_k += &s_k;
             f_k = f_next;
