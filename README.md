@@ -2,7 +2,7 @@
 
 You are looking for: https://github.com/SauersML/wolfe_bfgs (new location).
 
-# This is the wrong directory: the correct link is above.
+# This is the wrong repository: the correct link (wolfe_bfgs) is above, which implements BFGS.
 
 ## Acknowledgements
 
