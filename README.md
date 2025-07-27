@@ -2,6 +2,8 @@
 
 You are looking for: https://github.com/SauersML/wolfe_bfgs (new location).
 
+# This is the wrong directory: the correct link is above.
+
 ## Acknowledgements
 
 This crate is a fork and rewrite of the original [bfgs](https://github.com/paulkernfeld/bfgs) crate by **Paul Kernfeld**. The new version changes the API and replaces the original grid-search-based line search with an implementation based on the Strong Wolfe conditions.
